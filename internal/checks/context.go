@@ -1,0 +1,373 @@
+package checks
+
+import (
+	"context"
+	"errors"
+	"net/url"
+	"strconv"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/guaidao2/crackweb/internal/diff"
+	"github.com/guaidao2/crackweb/internal/finding"
+	"github.com/guaidao2/crackweb/internal/httpclient"
+	"github.com/guaidao2/crackweb/internal/httpmsg"
+	"github.com/guaidao2/crackweb/internal/i18n"
+	"github.com/guaidao2/crackweb/internal/waf"
+)
+
+// Encoding says how an injected value is encoded before it goes on the wire.
+type Encoding int
+
+// Encoding modes.
+const (
+	// EncodeNone sends the payload verbatim. Rarely right for a query string:
+	// an unencoded space or ampersand corrupts the request.
+	EncodeNone Encoding = iota
+	// EncodeURL percent-encodes the payload. The server decodes it back, so the
+	// target sees the same bytes while the request stays well-formed.
+	EncodeURL
+	// EncodeDouble encodes twice, for the layers of decoding that some
+	// frameworks apply.
+	EncodeDouble
+)
+
+// Context carries everything a check needs from the outside world.
+type Context struct {
+	// Client sends requests.
+	Client *httpclient.Client
+	// Bundle renders check messages in the user's language.
+	Bundle *i18n.Bundle
+	// OOB is the out-of-band interaction server; nil disables out-of-band
+	// checks, which is a supported configuration for environments with no
+	// external callbacks.
+	OOB OOBProvider
+	// Engine judges whether a response differs from its baseline.
+	Engine *diff.Engine
+	// Normalizer prepares response bodies for comparison.
+	Normalizer *diff.Normalizer
+	// Encode is the default encoding for injected values.
+	Encode Encoding
+	// Sessions are distinct authenticated identities, used by checks that need
+	// to compare what two users can see. Fewer than two means those checks
+	// cannot run, which is a supported configuration.
+	Sessions []Session
+	// WAF remembers what each target's firewall does and which payload
+	// generation gets through it. A nil state means the scanner behaves as if
+	// no target is protected, which is what a user gets with WAF handling
+	// turned off.
+	WAF *waf.State
+	// OOBWait bounds how long an out-of-band check waits for a callback. Zero
+	// means OOBWait's default.
+	OOBWait time.Duration
+	// Exchanges exposes the traffic seen so far, for checks that need to relate
+	// one request to another. A check that does not need it can ignore it; a nil
+	// value means the caller has no traffic store, and cross-request checks skip
+	// themselves rather than guessing.
+	Exchanges func() []Exchange
+
+	mu       sync.Mutex
+	requests int
+	failures []string
+}
+
+// NewContext builds a check context, filling in the pieces a check assumes
+// exist.
+func NewContext(client *httpclient.Client, bundle *i18n.Bundle, engine *diff.Engine, normalizer *diff.Normalizer) *Context {
+	return &Context{
+		Client:     client,
+		Bundle:     bundle,
+		Engine:     engine,
+		Normalizer: normalizer,
+		Encode:     EncodeURL,
+	}
+}
+
+// RequestCount returns how many requests the checks have sent, which the
+// scanner reports so a user can see what a scan cost.
+func (c *Context) RequestCount() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.requests
+}
+
+// Failures returns the transport errors seen so far, newest last.
+//
+// A check skips a payload whose request failed, which is right — there is
+// nothing to compare — but it must not be silent: a target that refuses every
+// second connection would otherwise look like a clean scan.
+func (c *Context) Failures() []string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	out := make([]string, len(c.failures))
+	copy(out, c.failures)
+	return out
+}
+
+// FailureCount returns how many requests failed outright.
+func (c *Context) FailureCount() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return len(c.failures)
+}
+
+// Do sends a request and counts it.
+func (c *Context) Do(ctx context.Context, req *httpmsg.Request) (*httpmsg.Response, error) {
+	c.mu.Lock()
+	c.requests++
+	c.mu.Unlock()
+
+	resp, err := c.Client.Do(ctx, req)
+	if err != nil && ctx.Err() == nil {
+		c.mu.Lock()
+		// Bound the list: a target that is down would otherwise fill memory
+		// with identical messages.
+		if len(c.failures) < 50 {
+			c.failures = append(c.failures, err.Error())
+		}
+		c.mu.Unlock()
+	}
+	return resp, err
+}
+
+// Exchange is one observed request and the response it produced.
+//
+// It is what a cross-request check reasons over: a stored value only becomes a
+// second-order injection when some later request reads it back, and that
+// relationship can only be seen across two exchanges.
+type Exchange struct {
+	Request  *httpmsg.Request
+	Response *httpmsg.Response
+}
+
+// Traffic returns the observed exchanges, or nil when there is no store.
+func (c *Context) Traffic() []Exchange {
+	if c == nil || c.Exchanges == nil {
+		return nil
+	}
+	return c.Exchanges()
+}
+
+// Session is one authenticated identity, expressed as the headers that carry
+// it. Cookies cover most applications; the header list allows for a bearer
+// token or a custom header instead.
+type Session struct {
+	// Label names the identity for reports, e.g. "user-a".
+	Label string
+	// Headers are applied to a request to authenticate as this identity.
+	Headers []httpmsg.KV
+}
+
+// authHeaders are the request fields that carry an identity. They are stripped
+// before a session is applied, so that a session replaces the request's own
+// credentials rather than being appended to them.
+var authHeaders = []string{"Cookie", "Authorization", "X-Api-Key", "X-Auth-Token"}
+
+// DoWithSession sends a request as a specific identity.
+func (c *Context) DoWithSession(ctx context.Context, req *httpmsg.Request, session Session) (*httpmsg.Response, error) {
+	clone := withoutAuth(req)
+	for _, header := range session.Headers {
+		clone.Header.Set(header.Name, header.Value)
+	}
+	return c.Do(ctx, clone)
+}
+
+// DoWithoutSession sends a request with every identity removed, which is how a
+// check establishes whether an object is protected at all.
+func (c *Context) DoWithoutSession(ctx context.Context, req *httpmsg.Request) (*httpmsg.Response, error) {
+	return c.Do(ctx, withoutAuth(req))
+}
+
+// withoutAuth returns a copy of a request with its credentials stripped.
+func withoutAuth(req *httpmsg.Request) *httpmsg.Request {
+	clone := req.Clone()
+	for _, name := range authHeaders {
+		clone.Header.Del(name)
+	}
+	return clone
+}
+
+// ErrNoParameter is returned when a check tries to inject into a target that
+// has no parameter.
+var ErrNoParameter = errors.New("checks: target has no parameter to inject into")
+
+// Inject rewrites the target's parameter with payload and sends the request.
+// It returns the mutated request as well as the response, so the finding can
+// carry the exact bytes that triggered it.
+func (c *Context) Inject(ctx context.Context, t *Target, payload string) (*httpmsg.Request, *httpmsg.Response, error) {
+	return c.InjectEncoded(ctx, t, payload, c.Encode)
+}
+
+// InjectEncoded is Inject with an explicit encoding, for checks that need to
+// control exactly what goes on the wire.
+func (c *Context) InjectEncoded(ctx context.Context, t *Target, payload string, enc Encoding) (*httpmsg.Request, *httpmsg.Response, error) {
+	if t == nil || t.Request == nil || t.Param == nil {
+		return nil, nil, ErrNoParameter
+	}
+	mutated, err := Mutate(t.Request, *t.Param, payload, enc)
+	if err != nil {
+		return nil, nil, err
+	}
+	resp, err := c.Do(ctx, mutated)
+	return mutated, resp, err
+}
+
+// Fingerprint reduces a response to a comparable fingerprint, using the
+// context's normalizer.
+func (c *Context) Fingerprint(resp *httpmsg.Response, echoPairs ...string) *diff.Fingerprint {
+	return diff.BuildFingerprint(resp, c.Normalizer, c.Engine.Keywords, echoPairs, false)
+}
+
+// StableBaseline fetches the request twice and returns a response that can be
+// trusted as a comparison point, or nil when the target is too unstable to
+// compare against.
+//
+// The response stored on the target is not usable for this. It was captured
+// during discovery — before a form was submitted, or in a different session
+// state — so a difference against it may be staleness rather than the probe's
+// doing, and a check that reports staleness reports it on every page. Two fresh
+// requests are made instead: if they disagree with each other, no single
+// comparison against this target means anything, and the check should skip
+// rather than guess.
+func (c *Context) StableBaseline(ctx context.Context, req *httpmsg.Request, tolerance float64) *httpmsg.Response {
+	if c == nil || req == nil {
+		return nil
+	}
+	first, err := c.Do(ctx, req)
+	if err != nil || first == nil {
+		return nil
+	}
+	second, err := c.Do(ctx, req)
+	if err != nil || second == nil {
+		return nil
+	}
+	if diff.CompareFingerprints(c.Fingerprint(first), c.Fingerprint(second)).Score < tolerance {
+		return nil
+	}
+	return second
+}
+
+// BaselineFingerprint fingerprints the target's original response.
+func (c *Context) BaselineFingerprint(t *Target, echoPairs ...string) *diff.Fingerprint {
+	if t == nil {
+		return nil
+	}
+	return c.Fingerprint(t.Response, echoPairs...)
+}
+
+// Mutate returns a copy of req with param's value replaced by payload.
+//
+// The mutation is done on the raw on-the-wire text rather than on a parsed
+// structure, so that every other parameter — and its encoding — survives
+// untouched. That fidelity is what lets a finding be reproduced exactly.
+func Mutate(req *httpmsg.Request, param httpmsg.Param, payload string, enc Encoding) (*httpmsg.Request, error) {
+	if req == nil {
+		return nil, errors.New("checks: cannot mutate a nil request")
+	}
+	out := req.Clone()
+	raw := encodeValue(payload, enc)
+
+	switch param.In {
+	case httpmsg.LocQuery:
+		if out.URL == nil {
+			return nil, errors.New("checks: request has no URL")
+		}
+		out.URL.RawQuery = replacePair(out.URL.RawQuery, param, raw)
+
+	case httpmsg.LocBody:
+		body := replacePair(string(out.Body), param, raw)
+		out.Body = []byte(body)
+		out.Header.Set("Content-Length", strconv.Itoa(len(body)))
+
+	case httpmsg.LocCookie:
+		cookie := replaceCookiePair(out.Header.Get("Cookie"), param, raw)
+		out.Header.Set("Cookie", cookie)
+
+	default:
+		return nil, errors.New("checks: unsupported injection location " + string(param.In))
+	}
+	return out, nil
+}
+
+// replacePair rewrites one "name=value" pair inside an ampersand-separated
+// list, matching on the raw name and skipping earlier namesakes.
+func replacePair(raw string, param httpmsg.Param, newRawValue string) string {
+	if raw == "" {
+		return param.RawName + "=" + newRawValue
+	}
+	parts := strings.Split(raw, "&")
+	seen := 0
+	for i, part := range parts {
+		name, _, _ := strings.Cut(part, "=")
+		if name != param.RawName {
+			continue
+		}
+		if seen == param.Occurrence {
+			parts[i] = name + "=" + newRawValue
+			return strings.Join(parts, "&")
+		}
+		seen++
+	}
+	// The parameter was not found, which can happen when the request was
+	// rewritten in between. Appending keeps the injection meaningful rather
+	// than silently testing nothing.
+	return raw + "&" + param.RawName + "=" + newRawValue
+}
+
+// replaceCookiePair rewrites one cookie value inside a Cookie header.
+func replaceCookiePair(header string, param httpmsg.Param, newRawValue string) string {
+	if header == "" {
+		return param.RawName + "=" + newRawValue
+	}
+	parts := strings.Split(header, ";")
+	seen := 0
+	for i, part := range parts {
+		trimmed := strings.TrimSpace(part)
+		name, _, _ := strings.Cut(trimmed, "=")
+		if strings.TrimSpace(name) != param.RawName {
+			continue
+		}
+		if seen == param.Occurrence {
+			parts[i] = " " + param.RawName + "=" + newRawValue
+			return strings.TrimSpace(strings.Join(parts, ";"))
+		}
+		seen++
+	}
+	return header + "; " + param.RawName + "=" + newRawValue
+}
+
+// encodeValue applies the requested encoding to a payload.
+func encodeValue(payload string, enc Encoding) string {
+	switch enc {
+	case EncodeURL:
+		return url.QueryEscape(payload)
+	case EncodeDouble:
+		return url.QueryEscape(url.QueryEscape(payload))
+	default:
+		return payload
+	}
+}
+
+// NewFinding builds a finding from a check's declaration, filling in the parts
+// every check would otherwise repeat.
+func NewFinding(c Check, t *Target, title, description, remediation i18n.Key) *finding.Finding {
+	f := &finding.Finding{
+		CheckID:        c.ID(),
+		TitleKey:       title,
+		DescriptionKey: description,
+		RemediationKey: remediation,
+		Severity:       c.Severity(),
+		Confidence:     finding.ConfidenceFirm,
+		Tags:           c.Tags(),
+	}
+	if t != nil && t.Request != nil {
+		f.Method = t.Request.Method
+		f.URL = t.Request.URLString()
+		f.Evidence.Request = t.Request.Raw()
+	}
+	if t != nil && t.Param != nil {
+		f.Param = string(t.Param.In) + ":" + t.Param.Name
+	}
+	return f
+}

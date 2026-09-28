@@ -1,0 +1,23 @@
+# 构建产物
+/bin/
+/dist/
+
+# crackweb 运行期工作区（CA 证书、sitemap 快照、报告）
+/.crackweb/
+*.pem
+*.key
+
+# 测试与扫描产物
+/*.report.html
+/*.report.json
+/requests/
+/sitemap/
+
+# 编辑器与系统文件
+.DS_Store
+*.swp
+.idea/
+.vscode/
+
+# Agent/tool session logs
+.reasonix/

@@ -1,0 +1,541 @@
+<!doctype html>
+<html lang="{{.Lang}}">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{.Title}} — {{.Target}}</title>
+<style>
+  :root {
+    --bg: #f5f6f8;
+    --surface: #ffffff;
+    --surface-2: #fafbfc;
+    --border: #e3e6ea;
+    --text: #14181d;
+    --muted: #5f6b7a;
+    --faint: #8b96a5;
+    --accent: #2f6feb;
+    --code-bg: #0e1116;
+    --code-fg: #d7dee8;
+    --critical: #b3123a;
+    --high: #d92d36;
+    --medium: #d97706;
+    --low: #2563eb;
+    --info: #64748b;
+    --unknown: #94a3b8;
+    --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+    --sans: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", "PingFang SC",
+            "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0b0e13;
+      --surface: #12161d;
+      --surface-2: #171c25;
+      --border: #242b36;
+      --text: #e6eaf0;
+      --muted: #9aa6b6;
+      --faint: #6b7787;
+      --accent: #5b8def;
+      --code-bg: #05070a;
+    }
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--sans);
+    font-size: 15px;
+    line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  .wrap { max-width: 1080px; margin: 0 auto; padding: 0 20px 64px; }
+
+  /* ---------- hero ---------- */
+  .hero {
+    background: linear-gradient(135deg, #1b2430 0%, #2b3a4d 55%, #1b2430 100%);
+    color: #fff;
+    padding: 40px 0 32px;
+    margin-bottom: 28px;
+    border-bottom: 3px solid var(--accent);
+  }
+  .hero .wrap { padding-bottom: 0; }
+  .brand {
+    font-family: var(--mono);
+    font-size: 12px;
+    letter-spacing: .08em;
+    text-transform: uppercase;
+    color: #9fb3cc;
+    margin-bottom: 14px;
+  }
+  .hero h1 { margin: 0 0 6px; font-size: 30px; font-weight: 650; letter-spacing: -.02em; }
+  .subtitle { margin: 0 0 20px; color: #b9c7d8; font-size: 15px; }
+  .target {
+    display: inline-block;
+    font-family: var(--mono);
+    font-size: 13px;
+    background: rgba(255,255,255,.10);
+    border: 1px solid rgba(255,255,255,.16);
+    padding: 7px 13px;
+    border-radius: 7px;
+    word-break: break-all;
+  }
+
+  h2 {
+    font-size: 15px;
+    font-weight: 650;
+    text-transform: uppercase;
+    letter-spacing: .06em;
+    color: var(--muted);
+    margin: 0 0 14px;
+  }
+
+  /* ---------- summary ---------- */
+  section.summary {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 22px;
+    margin-bottom: 26px;
+  }
+  .cards {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+    gap: 12px;
+    margin-bottom: 22px;
+  }
+  .card {
+    position: relative;
+    border: 1px solid var(--border);
+    border-left-width: 4px;
+    border-radius: 9px;
+    padding: 14px 16px 12px;
+    background: var(--surface-2);
+    overflow: hidden;
+  }
+  .card .count { font-size: 27px; font-weight: 680; line-height: 1.1; letter-spacing: -.02em; }
+  .card .label { font-size: 12px; text-transform: uppercase; letter-spacing: .07em; color: var(--muted); margin-top: 3px; }
+  .card .bar { height: 3px; background: var(--border); border-radius: 2px; margin-top: 11px; overflow: hidden; }
+  .card .bar span { display: block; height: 100%; border-radius: 2px; background: var(--sev); }
+
+  /* Severity is carried by a custom property, never by `color`: setting the
+     text colour on the container would bleed into every value inside the card. */
+  .sev-critical { --sev: var(--critical); }
+  .sev-high     { --sev: var(--high); }
+  .sev-medium   { --sev: var(--medium); }
+  .sev-low      { --sev: var(--low); }
+  .sev-info     { --sev: var(--info); }
+  .sev-unknown  { --sev: var(--unknown); }
+
+  .card { border-left-color: var(--sev); }
+  .finding { border-left-color: var(--sev); }
+  .card .count { color: var(--text); }
+  .card .label { color: var(--muted); }
+
+  .meta {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+    gap: 14px 24px;
+    margin: 0;
+    padding-top: 20px;
+    border-top: 1px solid var(--border);
+  }
+  .meta div { min-width: 0; }
+  .meta dt { font-size: 11px; text-transform: uppercase; letter-spacing: .07em; color: var(--faint); margin-bottom: 3px; }
+  .meta dd { margin: 0; font-size: 14px; word-break: break-word; }
+
+  /* ---------- toolbar ---------- */
+  .toolbar {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+    align-items: center;
+    margin-bottom: 16px;
+  }
+  .toolbar h2 { margin: 0; flex: 0 0 auto; }
+  .badge {
+    display: inline-block;
+    background: var(--accent);
+    color: #fff;
+    border-radius: 20px;
+    padding: 1px 9px;
+    font-size: 12px;
+    margin-left: 6px;
+    vertical-align: 1px;
+  }
+  #filter {
+    flex: 1 1 240px;
+    min-width: 200px;
+    padding: 9px 13px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--surface);
+    color: var(--text);
+    font-family: var(--sans);
+    font-size: 14px;
+  }
+  #filter:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+  .toolbar button {
+    padding: 9px 13px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--surface);
+    color: var(--muted);
+    font-family: var(--sans);
+    font-size: 13px;
+    cursor: pointer;
+  }
+  .toolbar button:hover { color: var(--text); border-color: var(--faint); }
+
+  /* ---------- findings ---------- */
+  .finding {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-left: 4px solid var(--border);
+    border-radius: 11px;
+    margin-bottom: 12px;
+    overflow: hidden;
+  }
+  .head {
+    display: grid;
+    grid-template-columns: auto 1fr auto;
+    grid-template-areas: "sev title chev" "sev where chev";
+    gap: 2px 12px;
+    align-items: center;
+    width: 100%;
+    padding: 15px 18px;
+    background: none;
+    border: 0;
+    text-align: left;
+    cursor: pointer;
+    color: inherit;
+    font: inherit;
+  }
+  .head:hover { background: var(--surface-2); }
+  .sev {
+    grid-area: sev;
+    font-size: 10px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: .07em;
+    padding: 4px 9px;
+    border-radius: 5px;
+    color: #fff;
+    white-space: nowrap;
+  }
+  .finding .sev { background: var(--sev); }
+  .title { grid-area: title; font-weight: 620; font-size: 16px; }
+  .where {
+    grid-area: where;
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--muted);
+    overflow-wrap: anywhere;
+  }
+  .chev { grid-area: chev; color: var(--faint); font-size: 13px; transition: transform .15s ease; }
+  .finding.open .chev { transform: rotate(90deg); }
+
+  .body { display: none; padding: 4px 18px 20px; border-top: 1px solid var(--border); }
+  .finding.open .body { display: block; }
+
+  .facts {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+    gap: 10px 22px;
+    margin: 16px 0;
+  }
+  .facts div { min-width: 0; }
+  .facts dt { font-size: 11px; text-transform: uppercase; letter-spacing: .07em; color: var(--faint); margin-bottom: 2px; }
+  .facts dd { margin: 0; font-family: var(--mono); font-size: 13px; color: var(--text); overflow-wrap: anywhere; }
+
+  .prose { margin: 14px 0; }
+  .prose h3 {
+    font-size: 12px;
+    text-transform: uppercase;
+    letter-spacing: .07em;
+    color: var(--faint);
+    margin: 0 0 6px;
+    font-weight: 650;
+  }
+  .prose p { margin: 0; color: var(--text); }
+
+  .chips { display: flex; flex-wrap: wrap; gap: 6px; margin: 12px 0 0; padding: 0; list-style: none; }
+  .chips li {
+    background: var(--surface-2);
+    border: 1px solid var(--border);
+    border-radius: 5px;
+    padding: 3px 8px;
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--muted);
+  }
+
+  details.evidence { margin-top: 14px; border-top: 1px solid var(--border); padding-top: 12px; }
+  details.evidence > summary {
+    cursor: pointer;
+    font-size: 12px;
+    text-transform: uppercase;
+    letter-spacing: .07em;
+    color: var(--faint);
+    font-weight: 650;
+    list-style: none;
+  }
+  details.evidence > summary::-webkit-details-marker { display: none; }
+  details.evidence > summary::before { content: "▸ "; }
+  details.evidence[open] > summary::before { content: "▾ "; }
+  details.evidence > summary:hover { color: var(--accent); }
+  /* Labels are upper-cased for a "tag" feel, but a command name must keep its
+     own casing: curl is not CURL. */
+  details.evidence > summary.nocase { text-transform: none; }
+
+  pre {
+    background: var(--code-bg);
+    color: var(--code-fg);
+    border-radius: 8px;
+    padding: 13px 15px;
+    overflow-x: auto;
+    font-family: var(--mono);
+    font-size: 12.5px;
+    line-height: 1.55;
+    margin: 10px 0 0;
+    white-space: pre;
+    tab-size: 2;
+  }
+  pre.wrap { white-space: pre-wrap; overflow-wrap: anywhere; }
+  pre:empty, pre.wrap:empty { display: none; }
+
+  a { color: var(--accent); overflow-wrap: anywhere; }
+  ul.refs { margin: 6px 0 0; padding-left: 18px; }
+  ul.refs li { margin-bottom: 3px; font-size: 14px; }
+
+  .empty {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 11px;
+    padding: 34px;
+    text-align: center;
+    color: var(--muted);
+  }
+
+  footer {
+    max-width: 1080px;
+    margin: 34px auto 0;
+    padding: 20px;
+    border-top: 1px solid var(--border);
+    color: var(--faint);
+    font-size: 12.5px;
+    line-height: 1.7;
+  }
+
+  @media print {
+    :root { --bg: #fff; --surface: #fff; --surface-2: #fff; }
+    .hero { background: #fff; color: #000; border-bottom: 2px solid #000; }
+    .hero .brand, .subtitle, .target { color: #333; }
+    .target { background: none; border-color: #ccc; }
+    .toolbar button, #filter { display: none; }
+    .body { display: block !important; }
+    .finding { break-inside: avoid; page-break-inside: avoid; }
+    pre { background: #f4f4f4; color: #111; border: 1px solid #ddd; }
+  }
+</style>
+</head>
+<body>
+
+<header class="hero">
+  <div class="wrap">
+    <div class="brand">{{.ToolLine}}</div>
+    <h1>{{.Title}}</h1>
+    <p class="subtitle">{{.Subtitle}}</p>
+    <div class="target">{{.Target}}</div>
+  </div>
+</header>
+
+<div class="wrap">
+
+  <section class="summary">
+    <h2>{{.Labels.Summary}}</h2>
+
+    <div class="cards">
+      {{range .Cards}}
+      <div class="card {{.Class}}">
+        <div class="count">{{.Count}}</div>
+        <div class="label">{{.Label}}</div>
+        <div class="bar"><span style="width:{{.Percent}}%"></span></div>
+      </div>
+      {{end}}
+    </div>
+
+    <dl class="meta">
+      <div><dt>{{.Labels.Started}}</dt><dd>{{.Started}}</dd></div>
+      <div><dt>{{.Labels.Finished}}</dt><dd>{{.Finished}}</dd></div>
+      <div><dt>{{.Labels.Duration}}</dt><dd>{{.Duration}}</dd></div>
+      <div><dt>{{.Labels.Endpoints}}</dt><dd>{{.Endpoints}}</dd></div>
+      <div><dt>{{.Labels.Requests}}</dt><dd>{{.Requests}}</dd></div>
+      {{if .Hosts}}<div><dt>{{.Labels.Hosts}}</dt><dd>{{.Hosts}}</dd></div>{{end}}
+    </dl>
+  </section>
+
+  <section class="findings">
+    <div class="toolbar">
+      <h2>{{.Labels.Findings}}<span class="badge">{{.Total}}</span></h2>
+      <input id="filter" type="search" placeholder="{{.Labels.Filter}}" autocomplete="off">
+      <button id="expandAll" type="button">{{.Labels.ExpandAll}}</button>
+      <button id="collapseAll" type="button">{{.Labels.CollapseAll}}</button>
+    </div>
+
+    {{if .Findings}}
+      {{range .Findings}}
+      <article class="finding {{.SevClass}}" data-search="{{.Search}}">
+        <button class="head" type="button" aria-expanded="false">
+          <span class="sev">{{.Severity}}</span>
+          <span class="title">{{.Title}}</span>
+          <span class="where">{{.Method}} {{.URL}}{{if .Param}}  ·  {{.Param}}{{end}}</span>
+          <span class="chev">▶</span>
+        </button>
+
+        <div class="body">
+          <dl class="facts">
+            <div><dt>{{$.Labels.Check}}</dt><dd>{{.Check}}</dd></div>
+            <div><dt>{{$.Labels.Confidence}}</dt><dd>{{.Confidence}}</dd></div>
+            {{if .Param}}<div><dt>{{$.Labels.Parameter}}</dt><dd>{{.Param}}</dd></div>{{end}}
+            {{if .CWE}}<div><dt>{{$.Labels.CWE}}</dt><dd>{{.CWE}}</dd></div>{{end}}
+            {{if .Template}}<div><dt>Template</dt><dd>{{.Template}}</dd></div>{{end}}
+          </dl>
+
+          {{if .Payload}}
+          <div class="prose">
+            <h3>{{$.Labels.Payload}}</h3>
+            <pre class="wrap">{{.Payload}}</pre>
+          </div>
+          {{end}}
+
+          <div class="prose">
+            <h3>{{$.Labels.Description}}</h3>
+            <p>{{.Descr}}</p>
+          </div>
+
+          <div class="prose">
+            <h3>{{$.Labels.Remediation}}</h3>
+            <p>{{.Fix}}</p>
+          </div>
+
+          {{if .Matches}}
+          <div class="prose">
+            <h3>{{$.Labels.Evidence}}</h3>
+            <ul class="chips">{{range .Matches}}<li>{{.}}</li>{{end}}</ul>
+          </div>
+          {{end}}
+
+          {{if .Tags}}
+          <div class="prose">
+            <h3>Tags</h3>
+            <ul class="chips">{{.Tags}}</ul>
+          </div>
+          {{end}}
+
+          {{if .Refs}}
+          <div class="prose">
+            <h3>{{$.Labels.References}}</h3>
+            <ul class="refs">{{range .Refs}}<li><a href="{{.}}" rel="noreferrer noopener">{{.}}</a></li>{{end}}</ul>
+          </div>
+          {{end}}
+
+          {{if .Diff}}
+          <details class="evidence">
+            <summary>{{$.Labels.Difference}}</summary>
+            <pre class="wrap">{{.Diff}}</pre>
+          </details>
+          {{end}}
+
+          <details class="evidence">
+            <summary>{{$.Labels.Request}}</summary>
+            <pre>{{.Request}}</pre>
+          </details>
+
+          {{if .Response}}
+          <details class="evidence">
+            <summary>{{$.Labels.Response}}</summary>
+            <pre>{{.Response}}</pre>
+          </details>
+          {{end}}
+
+          {{if .HasBase}}
+          <details class="evidence">
+            <summary>{{$.Labels.Baseline}}</summary>
+            <pre>{{.Baseline}}</pre>
+          </details>
+          {{end}}
+
+          {{if .Curl}}
+          <details class="evidence">
+            <summary class="nocase">{{$.Labels.Curl}}</summary>
+            <pre>{{.Curl}}</pre>
+          </details>
+          {{end}}
+        </div>
+      </article>
+      {{end}}
+    {{else}}
+      <p class="empty">{{.Labels.NoFindings}}</p>
+    {{end}}
+  </section>
+
+</div>
+
+<footer class="wrap">
+  {{.Labels.Disclaimer}}
+</footer>
+
+<script>
+(function () {
+  var filter = document.getElementById('filter');
+  var articles = Array.prototype.slice.call(document.querySelectorAll('.finding'));
+  var expandAll = document.getElementById('expandAll');
+  var collapseAll = document.getElementById('collapseAll');
+
+  function toggle(article, open) {
+    article.classList.toggle('open', open);
+    var head = article.querySelector('.head');
+    if (head) { head.setAttribute('aria-expanded', open ? 'true' : 'false'); }
+  }
+
+  articles.forEach(function (article) {
+    var head = article.querySelector('.head');
+    if (!head) { return; }
+    head.addEventListener('click', function () {
+      toggle(article, !article.classList.contains('open'));
+    });
+  });
+
+  // Open the first finding so the report does not start as a wall of headers.
+  if (articles.length > 0) { toggle(articles[0], true); }
+
+  if (expandAll) {
+    expandAll.addEventListener('click', function () {
+      articles.forEach(function (a) { if (a.style.display !== 'none') { toggle(a, true); } });
+    });
+  }
+  if (collapseAll) {
+    collapseAll.addEventListener('click', function () {
+      articles.forEach(function (a) { toggle(a, false); });
+    });
+  }
+
+  if (filter) {
+    filter.addEventListener('input', function () {
+      var needle = filter.value.trim().toLowerCase();
+      articles.forEach(function (article) {
+        var haystack = article.getAttribute('data-search') || '';
+        var match = needle === '' || haystack.indexOf(needle) !== -1;
+        article.style.display = match ? '' : 'none';
+      });
+    });
+  }
+})();
+</script>
+
+</body>
+</html>

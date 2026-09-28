@@ -1,0 +1,393 @@
+package cli
+
+import (
+	"errors"
+	"fmt"
+	"strings"
+	"time"
+
+	"github.com/guaidao2/crackweb/internal/ca"
+	"github.com/guaidao2/crackweb/internal/checks"
+	// Importing the check packages for their side effect populates the
+	// registry; without these the scan would run zero checks.
+	_ "github.com/guaidao2/crackweb/internal/checks/active"
+	_ "github.com/guaidao2/crackweb/internal/checks/passive"
+	"github.com/guaidao2/crackweb/internal/diff"
+	"github.com/guaidao2/crackweb/internal/finding"
+	"github.com/guaidao2/crackweb/internal/httpclient"
+	"github.com/guaidao2/crackweb/internal/httpmsg"
+	"github.com/guaidao2/crackweb/internal/i18n"
+	"github.com/guaidao2/crackweb/internal/oob"
+	"github.com/guaidao2/crackweb/internal/report"
+	"github.com/guaidao2/crackweb/internal/scan"
+	"github.com/guaidao2/crackweb/internal/sitemap"
+	"github.com/guaidao2/crackweb/internal/template"
+	"github.com/guaidao2/crackweb/internal/waf"
+)
+
+// requestOptions are the flags that control how crackweb talks to a target.
+// They are shared by proxy, crawl and scan so that all three behave, and read,
+// the same way.
+type requestOptions struct {
+	timeout      *time.Duration
+	rate         *float64
+	threads      *int
+	insecure     *bool
+	userAgent    *string
+	proxy        *string
+	sensitivity  *int
+	skipParams   *[]string
+	noNormalize  *bool
+	verbose      *bool
+	templates    *[]string
+	sessions     *[]string
+	noWAF        *bool
+	unsafeChecks *bool
+}
+
+// addRequestFlags registers the shared request options on a command.
+func addRequestFlags(fs *FlagSet) *requestOptions {
+	return &requestOptions{
+		timeout:      fs.Duration("timeout", "", 10*time.Second, "<dur>", i18n.KeyFlagTimeout),
+		rate:         fs.Float("rate", "", 0, "<n>", i18n.KeyFlagRate),
+		threads:      fs.Int("threads", "t", 8, "<n>", i18n.KeyFlagThreads),
+		insecure:     fs.Bool("insecure", "k", i18n.KeyFlagInsecure),
+		userAgent:    fs.String("user-agent", "A", "", "<ua>", i18n.KeyFlagUserAgent),
+		proxy:        fs.String("proxy", "", "", "<url>", i18n.KeyFlagProxy),
+		sensitivity:  fs.Int("sensitivity", "s", 3, "<1-5>", i18n.KeyFlagSensitivity),
+		skipParams:   fs.StringSlice("skip-param", "", "<name>", i18n.KeyFlagSkipParams),
+		noNormalize:  fs.Bool("no-normalize", "", i18n.KeyFlagNoNormalize),
+		verbose:      fs.Bool("verbose", "v", i18n.KeyFlagVerbose),
+		templates:    fs.StringSlice("templates", "", "<dir>", i18n.KeyFlagTemplates),
+		sessions:     fs.StringSlice("session", "", "<header>", i18n.KeyFlagSession),
+		noWAF:        fs.Bool("no-waf", "", i18n.KeyFlagNoWAF),
+		unsafeChecks: fs.Bool("enable-unsafe-checks", "", i18n.KeyFlagUnsafeChecks),
+	}
+}
+
+// thresholds turns the sensitivity flag into diff thresholds.
+func (o *requestOptions) thresholds() (diff.Thresholds, error) {
+	level := *o.sensitivity
+	if level < 1 || level > 5 {
+		return diff.Thresholds{}, errors.New("sensitivity out of range")
+	}
+	return diff.ThresholdsForSensitivity(level), nil
+}
+
+// client builds the HTTP client the checks will use.
+func (o *requestOptions) client() (*httpclient.Client, error) {
+	return httpclient.New(httpclient.Options{
+		Timeout:      *o.timeout,
+		Proxy:        *o.proxy,
+		Insecure:     *o.insecure,
+		UserAgent:    *o.userAgent,
+		Rate:         *o.rate,
+		MaxRedirects: 10,
+	})
+}
+
+// normalizer builds the response normaliser.
+func (o *requestOptions) normalizer() (*diff.Normalizer, error) {
+	return diff.New(diff.Options{Off: *o.noNormalize})
+}
+
+// scanContext assembles everything a scan needs: the response normaliser, the
+// difference engine and the scanner that drives the checks. The HTTP client is
+// passed in so that the reference used to load templates and the one the checks
+// use are the same object, sharing its connection pool and rate limiter.
+func (o *requestOptions) scanContext(app *App, client *httpclient.Client, oobServer *oob.Server, selected []checks.Check, passiveOnly bool) (*checks.Context, *scan.Scanner, error) {
+	thresholds, err := o.thresholds()
+	if err != nil {
+		return nil, nil, &UsageError{msg: app.T(i18n.KeyErrBadSensitivity)}
+	}
+	normalizer, err := o.normalizer()
+	if err != nil {
+		return nil, nil, err
+	}
+
+	var provider checks.OOBProvider
+	if oobServer != nil {
+		provider = oobServer
+	}
+
+	engine := diff.NewEngine(thresholds, diff.DefaultKeywords())
+	checkCtx := checks.NewContext(client, app.Bundle, engine, normalizer)
+	checkCtx.OOB = provider
+	// WAF handling is on by default: it costs one probe per host and is what
+	// makes the scanner work at all against a filtered target.
+	checkCtx.WAF = waf.NewState(!*o.noWAF)
+	checkCtx.Sessions = parseSessions(*o.sessions)
+
+	// The access-control check is meaningless with fewer than two identities;
+	// say so before the scan rather than letting it silently do nothing.
+	if len(checkCtx.Sessions) < 2 {
+		for _, check := range selected {
+			if check.ID() == "idor" {
+				app.Warn(i18n.KeyMsgIDORNeedsSessions)
+				break
+			}
+		}
+	} else {
+		app.Note(i18n.KeyMsgSessionsLoaded, len(checkCtx.Sessions))
+	}
+
+	scanner := scan.New(scan.Options{
+		Checks:      selected,
+		Concurrency: *o.threads,
+		SkipParams:  *o.skipParams,
+		PassiveOnly: passiveOnly,
+		Bundle:      app.Bundle,
+		OOB:         provider,
+		Logf:        func(string, ...any) {},
+		OnFinding: func(f *finding.Finding) {
+			app.printFinding(f)
+		},
+	}, checkCtx)
+	return checkCtx, scanner, nil
+}
+
+// selectedChecks resolves the --checks flag and any --templates directories into
+// the set of checks to run.
+//
+// Names that matched nothing are reported rather than ignored: a typo in
+// --checks would otherwise turn into a scan that silently covers less than the
+// user asked for.
+func selectedChecks(app *App, spec string, templateDirs []string, client *httpclient.Client, includeUnsafe bool) ([]checks.Check, error) {
+	// Templates are loaded first so that they are candidates for selection:
+	// "--checks template" has to work before the user has seen the loaded set.
+	candidates := checks.All()
+	if len(templateDirs) > 0 {
+		runner := template.NewRunner(client)
+		loaded, unsupported, errs := template.LoadChecks(runner, templateDirs)
+		for _, err := range errs {
+			app.Warn(i18n.KeyMsgRequestError, err)
+		}
+		for id, reasons := range unsupported {
+			app.Warn(i18n.KeyMsgTemplateUnsupported, id, strings.Join(reasons, ", "))
+		}
+		for _, check := range loaded {
+			candidates = append(candidates, check)
+		}
+		if len(loaded) > 0 {
+			app.Note(i18n.KeyMsgTemplateLoaded, len(loaded), strings.Join(templateDirs, ", "))
+		}
+	}
+
+	names := splitList(spec)
+	selected, unknown := checks.SelectFrom(candidates, names, includeUnsafe)
+	if len(unknown) > 0 {
+		return nil, &UsageError{msg: app.T(i18n.KeyMsgUnknownChecks, strings.Join(unknown, ", "))}
+	}
+	if len(selected) == 0 {
+		selected = candidates
+	}
+
+	// A user who ticked the box is told which of the running checks can affect
+	// the target, because that is the whole reason the switch exists.
+	var unsafe []string
+	for _, check := range selected {
+		if checks.IsUnsafe(check) {
+			unsafe = append(unsafe, check.ID())
+		}
+	}
+	if len(unsafe) > 0 {
+		app.Warn(i18n.KeyMsgUnsafeChecks, strings.Join(unsafe, ", "))
+	}
+	return selected, nil
+}
+
+// parseSessions turns --session values into identities.
+//
+// Two spellings are accepted, because both are natural to type: a full header
+// line ("Cookie: sess=abc", "Authorization: Bearer x") when the identity lives
+// in something other than a cookie, and a bare cookie string ("sess=abc;
+// uid=1") when it does not.
+func parseSessions(specs []string) []checks.Session {
+	var sessions []checks.Session
+	for _, spec := range specs {
+		spec = strings.TrimSpace(spec)
+		if spec == "" {
+			continue
+		}
+
+		header := httpmsg.KV{}
+		if name, value, ok := strings.Cut(spec, ":"); ok {
+			name = strings.TrimSpace(name)
+			// A header name is a bare token: no spaces, no '='. That is what
+			// tells "Cookie: a=b" from a cookie value that contains a colon.
+			if name != "" && !strings.ContainsAny(name, "= \t") {
+				header = httpmsg.KV{Name: name, Value: strings.TrimSpace(value)}
+			}
+		}
+		if header.Name == "" {
+			header = httpmsg.KV{Name: "Cookie", Value: spec}
+		}
+
+		sessions = append(sessions, checks.Session{
+			Label:   fmt.Sprintf("session-%d", len(sessions)+1),
+			Headers: []httpmsg.KV{header},
+		})
+	}
+	return sessions
+}
+
+// splitList splits a comma-separated list, trimming blanks.
+func splitList(spec string) []string {
+	var out []string
+	for _, part := range strings.Split(spec, ",") {
+		part = strings.TrimSpace(part)
+		if part != "" {
+			out = append(out, part)
+		}
+	}
+	return out
+}
+
+// trafficView adapts a sitemap to what checks expect, so that packages which
+// know nothing about each other can still share the traffic record.
+func trafficView(store *sitemap.Store) func() []checks.Exchange {
+	return func() []checks.Exchange {
+		if store == nil {
+			return nil
+		}
+		entries := store.All()
+		out := make([]checks.Exchange, 0, len(entries))
+		for _, entry := range entries {
+			if entry.Request == nil || entry.Response == nil {
+				continue
+			}
+			out = append(out, checks.Exchange{Request: entry.Request, Response: entry.Response})
+		}
+		return out
+	}
+}
+
+// loadCA loads the workspace CA, creating it on first use.
+func loadCA(app *App, dir string) (*ca.CA, error) {
+	if dir == "" {
+		dir = ca.DefaultDir("")
+	}
+	authority, created, err := ca.LoadOrGenerate(dir)
+	if err != nil {
+		return nil, fmt.Errorf(app.T(i18n.KeyErrLoadCA), err)
+	}
+	if created {
+		app.Note(i18n.KeyMsgCAGenerated, dir)
+	} else {
+		app.Note(i18n.KeyMsgCALoaded, dir)
+	}
+	return authority, nil
+}
+
+// newOOB builds the interaction server. The caller starts it, so that a failure
+// to bind can be reported without having half-started a scan.
+func newOOB(app *App, opts oob.Options) *oob.Server {
+	return oob.New(oob.Options{
+		HTTPAddr: opts.HTTPAddr,
+		DNSAddr:  opts.DNSAddr,
+		Domain:   opts.Domain,
+		Logf: func(format string, args ...any) {
+			if !app.Quiet {
+				app.Printf(format, args...)
+			}
+		},
+	})
+}
+
+// findingTitle renders a finding's title, preferring literal text so that a
+// template's own wording is shown rather than an empty catalogue lookup.
+func (a *App) findingTitle(f *finding.Finding) string {
+	if f.Title != "" {
+		return f.Title
+	}
+	return a.T(f.TitleKey)
+}
+
+// printFinding renders a finding as it is confirmed, so a scan shows progress
+// rather than silence followed by a wall of text.
+func (a *App) printFinding(f *finding.Finding) {
+	severity := a.T(severityKey(f.Severity))
+	a.Printf("%s %s  %s", a.paint(ansiRed, "["+severity+"]"), a.bold(a.findingTitle(f)), a.dim(f.CheckID))
+	if f.Method != "" || f.URL != "" {
+		a.Printf("    %s %s", f.Method, f.URL)
+	}
+	if f.Param != "" {
+		a.Printf("    %s: %s", a.T(i18n.KeyReportFieldParam), f.Param)
+	}
+	if f.Payload != "" {
+		a.Printf("    %s: %s", a.T(i18n.KeyReportFieldPayload), truncateForDisplay(f.Payload, 120))
+	}
+	a.Print("")
+}
+
+// severityKey maps a severity to its catalogue key.
+func severityKey(s finding.Severity) i18n.Key {
+	switch s {
+	case finding.SeverityCritical:
+		return i18n.KeySeverityCritical
+	case finding.SeverityHigh:
+		return i18n.KeySeverityHigh
+	case finding.SeverityMedium:
+		return i18n.KeySeverityMedium
+	case finding.SeverityLow:
+		return i18n.KeySeverityLow
+	case finding.SeverityInfo:
+		return i18n.KeySeverityInfo
+	default:
+		return i18n.KeySeverityUnknown
+	}
+}
+
+// truncateForDisplay shortens a value for a terminal line.
+func truncateForDisplay(s string, max int) string {
+	s = strings.ReplaceAll(strings.ReplaceAll(s, "\r", ""), "\n", " ")
+	runes := []rune(s)
+	if len(runes) <= max {
+		return s
+	}
+	return string(runes[:max]) + "…"
+}
+
+// writeReport renders a report for a finished run and tells the user where it
+// went. A failure to write is reported but not fatal: the findings were already
+// printed to the terminal, and losing the run over a bad path would be worse.
+func writeReport(app *App, path, target string, store *sitemap.Store, scanner *scan.Scanner) {
+	if path == "" {
+		return
+	}
+	bundle := app.Bundle
+	data := &report.Data{
+		Target:   target,
+		Bundle:   bundle,
+		Started:  time.Now(),
+		Finished: time.Now(),
+		Findings: scanner.Findings(),
+	}
+	if store != nil {
+		data.Hosts = store.Hosts()
+	}
+	summary := scanner.Summary(store)
+	data.Started = summary.Started
+	data.Finished = summary.Finished
+	data.Endpoints = summary.Endpoints
+	data.Requests = summary.Stats.Requests
+
+	if err := report.Write(path, data); err != nil {
+		app.Warn(i18n.KeyMsgRequestError, err)
+		return
+	}
+	app.Note(i18n.KeyMsgReportWritten, path)
+}
+
+// printChecks lists the available checks, grouped by kind.
+func (a *App) printChecks() {
+	a.Printf("%s:", a.T(i18n.KeyMsgChecksListed))
+	for _, check := range checks.All() {
+		kind := "active"
+		if check.Passive() {
+			kind = "passive"
+		}
+		a.Printf("  %-28s %-8s %-9s %s", check.ID(), kind, check.Severity(),
+			strings.Join(check.Tags(), ","))
+	}
+}

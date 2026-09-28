@@ -1,0 +1,26 @@
+# A passive-flavoured template: it asks for a well-known file and looks for its
+# contents. The same shape works for any "did this leak?" check.
+id: example-env-exposure
+
+info:
+  name: Exposed environment file
+  author: crackweb
+  severity: critical
+  description: An environment file is served over HTTP, exposing credentials.
+  tags: exposure,config
+  classification:
+    cwe-id: CWE-538
+
+http:
+  - method: GET
+    path:
+      - "{{RootURL}}/.env"
+    matchers-condition: and
+    matchers:
+      - type: regex
+        part: body
+        regex:
+          - "(?m)^(APP_KEY|DB_PASSWORD|SECRET_KEY|AWS_SECRET_ACCESS_KEY)="
+      - type: status
+        status:
+          - 200
