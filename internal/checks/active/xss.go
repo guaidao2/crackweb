@@ -56,6 +56,71 @@ func (xssReflected) Tags() []string {
 }
 func (xssReflected) Passive() bool { return false }
 
+// inertElements are elements whose content the HTML parser treats as text, so a
+// tag inside one never runs.
+var inertElements = []string{"textarea", "title", "xmp", "noscript", "noframes"}
+
+// executableContext reports whether the first occurrence of marker in body is
+// somewhere a browser would parse it as markup.
+//
+// The test is structural, not lexical. A payload is neutralised when the parser
+// is already inside something that swallows markup — a comment, a text-only
+// element — or when it sits inside a tag, where "<" is just a character in an
+// attribute value. Deciding this needs no rendering engine: it needs only to
+// look at what the document has open at that point, which is what an HTML parser
+// would be doing anyway.
+func executableContext(body, marker string) bool {
+	index := strings.Index(body, marker)
+	if index < 0 {
+		return false
+	}
+	before := body[:index]
+
+	// Inside an unterminated comment, nothing that follows is parsed.
+	if strings.LastIndex(before, "<!--") > strings.LastIndex(before, "-->") {
+		return false
+	}
+
+	// Inside a text-only element, tags are text.
+	lowerBefore := strings.ToLower(before)
+	for _, name := range inertElements {
+		open := strings.LastIndex(lowerBefore, "<"+name)
+		if open >= 0 && strings.LastIndex(lowerBefore, "</"+name) < open {
+			return false
+		}
+	}
+
+	// Inside a tag: the parser is reading an attribute value, so the payload
+	// cannot open an element — unless it is one of the seeds that closes the
+	// attribute first.
+	if lastOpen, lastClose := strings.LastIndex(before, "<"), strings.LastIndex(before, ">"); lastOpen > lastClose {
+		switch {
+		case strings.HasPrefix(marker, "\""), strings.HasPrefix(marker, "'"),
+			strings.HasPrefix(marker, ">"), strings.HasPrefix(marker, "/>"):
+			return true
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+// describeContext names where the payload landed, for the evidence.
+func describeContext(body, marker string) string {
+	index := strings.Index(body, marker)
+	if index < 0 {
+		return "unknown"
+	}
+	before := strings.ToLower(body[:index])
+	if strings.LastIndex(before, "<script") > strings.LastIndex(before, "</script") {
+		return "inside a script block"
+	}
+	if lastOpen, lastClose := strings.LastIndex(before, "<"), strings.LastIndex(before, ">"); lastOpen > lastClose {
+		return "in an attribute, closing it first"
+	}
+	return "in the document body"
+}
+
 func (xssReflected) Run(ctx context.Context, c *checks.Context, t *checks.Target) []*finding.Finding {
 	if t.Param == nil || t.Response == nil {
 		return nil
@@ -69,7 +134,10 @@ func (xssReflected) Run(ctx context.Context, c *checks.Context, t *checks.Target
 	baseline := string(t.Response.Body)
 	c.ProbeWAF(ctx, t)
 
-	var reflected string
+	var (
+		reflected string
+		context   string
+	)
 	attempt, err := c.SendVariants(ctx, t, payload.XSS, "xss-reflected", xssSeeds,
 		func(_ *httpmsg.Request, resp *httpmsg.Response, variant payload.Variant) bool {
 			candidate := wireDecoded(variant.Value)
@@ -81,7 +149,16 @@ func (xssReflected) Run(ctx context.Context, c *checks.Context, t *checks.Target
 			if strings.Contains(baseline, candidate) {
 				return false
 			}
+			// Being present is not the same as being executable. A payload
+			// printed inside a comment, a textarea or an attribute value has
+			// been neutralised by the page's structure whatever it says, and
+			// reporting it is the difference between a scanner people run and a
+			// scanner people stop running.
+			if !executableContext(string(resp.Body), candidate) {
+				return false
+			}
 			reflected = candidate
+			context = describeContext(string(resp.Body), candidate)
 			return true
 		})
 	if err != nil || attempt == nil {
@@ -104,6 +181,7 @@ func (xssReflected) Run(ctx context.Context, c *checks.Context, t *checks.Target
 	f.Evidence.Baseline = truncate(t.Response.Body, 4096)
 	f.Evidence.Matches = []string{
 		c.Bundle.T(i18n.KeyEvidenceReflect, reflected),
+		"the payload landed outside every inert context and is parsed as markup: " + context,
 		variantNote(c, attempt),
 	}
 	f.Evidence.Diff = extractAround(string(attempt.Response.Body), reflected, 240)

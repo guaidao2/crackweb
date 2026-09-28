@@ -167,14 +167,6 @@ func (ssti) Run(ctx context.Context, c *checks.Context, t *checks.Target) []*fin
 	return []*finding.Finding{f}
 }
 
-// Similarity thresholds for the NoSQL boolean oracle. Tight on purpose: the
-// true branch has to be indistinguishable from the baseline and the false one
-// clearly not.
-const (
-	nosqlTrueSimilarity  = 0.995
-	nosqlFalseSimilarity = 0.98
-)
-
 // nosqlErrorSignatures are the errors MongoDB and friends produce.
 //
 // Every entry has to be wording the *server* produces, never something a payload
@@ -251,39 +243,107 @@ func (nosqli) Run(ctx context.Context, c *checks.Context, t *checks.Target) []*f
 	return nosqlBooleanOracle(ctx, c, t)
 }
 
-// nosqlBooleanOracle compares a true condition against a false one.
+// nosqlBooleanFamilies are groups of NoSQL conditions that the server must
+// treat identically, for the same reason booleanFamilies exists for SQL.
 //
-// It runs unmuted on purpose: a boolean oracle needs a matched pair of payloads
-// that differ only in their truth value, and applying independent transformations
-// to each half would break the comparison the conclusion rests on.
+// A `$where` clause is evaluated for its truth value, so `'1'=='1` and `'2'=='2`
+// are the same thing to it and must produce the same page; `'1'=='2` and
+// `'3'=='4` are likewise the same as each other and different from the true
+// ones. Two spellings per truth value is what separates a real oracle from a
+// page that merely changes when it is handed a string it does not understand.
+var nosqlBooleanFamilies = []struct {
+	name        string
+	trueValues  []string
+	falseValues []string
+	// anchored marks a family whose true branch should reproduce the baseline.
+	// The `&&` form narrows the query back to what it was; the `||` form widens
+	// it, so only the first is judged that way.
+	anchored bool
+}{
+	{
+		name:        "OR, single quotes",
+		trueValues:  []string{"'||'1'=='1", "'||'2'=='2"},
+		falseValues: []string{"'||'1'=='2", "'||'3'=='4"},
+	},
+	{
+		name:        "OR, double quotes",
+		trueValues:  []string{`"||"1"=="1`, `"||"2"=="2`},
+		falseValues: []string{`"||"1"=="2`, `"||"3"=="4`},
+	},
+	{
+		name:        "AND, single quotes",
+		trueValues:  []string{"'&&'1'=='1", "'&&'2'=='2"},
+		falseValues: []string{"'&&'1'=='2", "'&&'3'=='4"},
+		anchored:    true,
+	},
+}
+
+// nosqlBooleanOracle tests whether the parameter feeds a condition into a query
+// the server evaluates, by asking whether its notion of equivalence shows up.
+//
+// The reasoning is the same as the SQL boolean check's, and so is the reason it
+// needs no knowledge of the parameter: four probes make a family — two true
+// conditions spelled differently, two false ones likewise — and a server that
+// evaluates them produces exactly two distinct pages. It runs unmuted on
+// purpose: a boolean oracle needs payloads that differ only in their truth
+// value, and transforming each half independently would break the comparison
+// the conclusion rests on.
 func nosqlBooleanOracle(ctx context.Context, c *checks.Context, t *checks.Target) []*finding.Finding {
 	base := c.BaselineFingerprint(t)
 	if base == nil || base.NormLen == 0 {
 		return nil
 	}
 
-	for _, pair := range [][2]string{
-		{"' || '1'=='1", "' || '1'=='2"},
-		{`" || "1"=="1`, `" || "1"=="2`},
-	} {
-		trueReq, trueResp, err := c.InjectEncoded(ctx, t, pair[0], checks.EncodeNone)
-		if err != nil || trueResp == nil {
-			continue
+	for _, family := range nosqlBooleanFamilies {
+		var (
+			branches []*httpmsg.Response
+			requests []*httpmsg.Request
+			values   []string
+		)
+		ok := true
+		for _, value := range append(append([]string{}, family.trueValues...), family.falseValues...) {
+			request, response, err := c.InjectEncoded(ctx, t, value, checks.EncodeNone)
+			if err != nil || request == nil || response == nil || response.Status >= 400 {
+				ok = false
+				break
+			}
+			requests = append(requests, request)
+			branches = append(branches, response)
+			values = append(values, value)
 		}
-		_, falseResp, err := c.InjectEncoded(ctx, t, pair[1], checks.EncodeNone)
-		if err != nil || falseResp == nil {
+		if !ok {
 			continue
 		}
 
-		simTrue := diff.CompareFingerprints(base, c.Fingerprint(trueResp)).Score
-		simFalse := diff.CompareFingerprints(base, c.Fingerprint(falseResp)).Score
-		simBetween := diff.CompareFingerprints(c.Fingerprint(trueResp), c.Fingerprint(falseResp)).Score
-		if simTrue < nosqlTrueSimilarity || simFalse > nosqlFalseSimilarity || simBetween > nosqlFalseSimilarity {
+		fp := func(i int) *diff.Fingerprint {
+			return c.Fingerprint(branches[i], echoRestore(values[i], t.Param.Value)...)
+		}
+		trueOne, trueTwo := fp(0), fp(1)
+		falseOne, falseTwo := fp(2), fp(3)
+
+		// Same truth value, same page; different truth value, different page.
+		if trueOne.NormHash != trueTwo.NormHash {
+			continue
+		}
+		if falseOne.NormHash != falseTwo.NormHash {
+			continue
+		}
+		if trueOne.NormHash == falseOne.NormHash {
+			continue
+		}
+		if family.anchored && trueOne.NormHash != base.NormHash {
 			continue
 		}
 
-		f := nosqlFinding(c, t, trueReq, falseResp, pair[1], "boolean oracle")
+		simTrue := diff.CompareFingerprints(base, trueOne).Score
+		simFalse := diff.CompareFingerprints(base, falseOne).Score
+		simBetween := diff.CompareFingerprints(trueOne, falseOne).Score
+
+		f := nosqlFinding(c, t, requests[0], branches[2], values[2], "boolean oracle")
 		f.Confidence = finding.ConfidenceFirm
+		f.Evidence.Matches = append(f.Evidence.Matches,
+			"an equivalent true condition ("+values[1]+") and an equivalent false one ("+values[3]+
+				") each reproduced its group, so the difference tracks the condition rather than the payload")
 		f.Evidence.Diff = c.Bundle.T(i18n.KeyEvidenceBoolean, round3(simTrue), round3(simFalse), round3(simBetween))
 		return []*finding.Finding{f}
 	}

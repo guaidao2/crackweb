@@ -447,4 +447,8 @@ var english = map[Key]string{
 	KeyCheckCleartextPasswordFix: "Serve the whole application over HTTPS and redirect http:// to " +
 		"it, with HSTS so the redirect cannot be stripped. Until then, treat any credential " +
 		"submitted this way as compromised.",
+	KeyFlagCookie:    "Session cookie(s) sent with every request, e.g. session=abc; csrf=xyz. Repeatable; a leading Cookie: is tolerated.",
+	KeyFlagHeader:    "Extra header sent with every request, in Name: value form. Repeatable - use it for bearer tokens and API keys.",
+	KeyFlagBasicAuth: "HTTP Basic credentials as user:password; sent as an Authorization header.",
+	KeyFlagRandomUA:  "Compose a fresh, plausible User-Agent for every request instead of identifying as crackweb. Use it when the tool's own name would pollute a log you are reviewing, or to keep a scan from being grouped by fingerprint.",
 }

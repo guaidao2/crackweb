@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"strings"
@@ -43,6 +44,10 @@ type requestOptions struct {
 	sessions     *[]string
 	noWAF        *bool
 	unsafeChecks *bool
+	cookies      *[]string
+	headers      *[]string
+	basicAuth    *string
+	randomUA     *bool
 }
 
 // addRequestFlags registers the shared request options on a command.
@@ -61,6 +66,10 @@ func addRequestFlags(fs *FlagSet) *requestOptions {
 		templates:    fs.StringSlice("templates", "", "<dir>", i18n.KeyFlagTemplates),
 		sessions:     fs.StringSlice("session", "", "<header>", i18n.KeyFlagSession),
 		noWAF:        fs.Bool("no-waf", "", i18n.KeyFlagNoWAF),
+		cookies:      fs.StringSlice("cookie", "C", "<k=v; k2=v2>", i18n.KeyFlagCookie),
+		headers:      fs.StringSlice("header", "H", "<name: value>", i18n.KeyFlagHeader),
+		basicAuth:    fs.String("basic-auth", "", "", "<user:pass>", i18n.KeyFlagBasicAuth),
+		randomUA:     fs.Bool("random-ua", "", i18n.KeyFlagRandomUA),
 		unsafeChecks: fs.Bool("enable-unsafe-checks", "", i18n.KeyFlagUnsafeChecks),
 	}
 }
@@ -76,6 +85,10 @@ func (o *requestOptions) thresholds() (diff.Thresholds, error) {
 
 // client builds the HTTP client the checks will use.
 func (o *requestOptions) client() (*httpclient.Client, error) {
+	credentials, err := o.credentials()
+	if err != nil {
+		return nil, err
+	}
 	return httpclient.New(httpclient.Options{
 		Timeout:      *o.timeout,
 		Proxy:        *o.proxy,
@@ -83,7 +96,64 @@ func (o *requestOptions) client() (*httpclient.Client, error) {
 		UserAgent:    *o.userAgent,
 		Rate:         *o.rate,
 		MaxRedirects: 10,
+		Credentials:  credentials,
+		RandomUA:     *o.randomUA,
 	})
+}
+
+// credentials turns the identity flags into the headers every request carries.
+//
+// Three spellings for one idea, because they are not interchangeable in
+// practice: a cookie is what a browser session gives you, Basic is what a
+// staging environment in front of the app asks for, and a bare header covers
+// everything else — bearer tokens, API keys, an X-Forwarded-For the deployment
+// expects. Requiring the user to hand-encode any of those into one of the others
+// would just be a way to get it wrong.
+func (o *requestOptions) credentials() ([]httpclient.Credential, error) {
+	var creds []httpclient.Credential
+
+	for _, raw := range *o.cookies {
+		value := strings.TrimSpace(raw)
+		if value == "" {
+			continue
+		}
+		// A cookie value pasted from a browser may arrive with the header name
+		// still attached, which is the single most common way to get this wrong.
+		value = strings.TrimPrefix(value, "Cookie:")
+		value = strings.TrimPrefix(value, "cookie:")
+		creds = append(creds, httpclient.Credential{Name: "Cookie", Value: strings.TrimSpace(value)})
+	}
+
+	for _, raw := range *o.headers {
+		// A blank value is skipped rather than rejected: an argument like
+		// --header "$EXTRA" expands to nothing when the variable is unset, and
+		// failing on that would break scripts for no reason. A non-empty value
+		// that is not a header is still an error, because guessing there would
+		// scan under the wrong identity.
+		if strings.TrimSpace(raw) == "" {
+			continue
+		}
+		name, value, found := strings.Cut(raw, ":")
+		if !found {
+			return nil, &UsageError{msg: fmt.Sprintf("malformed --header %q: expected %q", raw, "Name: value")}
+		}
+		name = strings.TrimSpace(name)
+		if name == "" {
+			return nil, &UsageError{msg: "malformed --header: the name is empty"}
+		}
+		creds = append(creds, httpclient.Credential{Name: name, Value: strings.TrimSpace(value)})
+	}
+
+	if raw := strings.TrimSpace(*o.basicAuth); raw != "" {
+		user, pass, found := strings.Cut(raw, ":")
+		if !found {
+			return nil, &UsageError{msg: fmt.Sprintf("malformed --basic-auth: expected %q", "user:password")}
+		}
+		token := base64.StdEncoding.EncodeToString([]byte(user + ":" + pass))
+		creds = append(creds, httpclient.Credential{Name: "Authorization", Value: "Basic " + token})
+	}
+
+	return creds, nil
 }
 
 // normalizer builds the response normaliser.

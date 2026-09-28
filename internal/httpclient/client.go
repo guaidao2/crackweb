@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/guaidao2/crackweb/internal/httpmsg"
+	"github.com/guaidao2/crackweb/internal/version"
 )
 
 // DefaultMaxBody bounds how much of a response is read, so that a single large
@@ -56,6 +57,23 @@ type Options struct {
 	// DisableKeepAlives turns off connection reuse, which helps against servers
 	// that misbehave on reused connections.
 	DisableKeepAlives bool
+	// Credentials are headers sent with every request, which is how the scanner
+	// is given an identity.
+	//
+	// This is the difference between scanning a login page and scanning what is
+	// behind it: without it the crawler can only reach what an anonymous visitor
+	// can reach, and every active check is aimed at the anonymous view. Setting
+	// them here rather than at each call site means checks that build their own
+	// requests carry the identity too.
+	Credentials []Credential
+}
+
+// Credential is one header applied to outgoing requests.
+type Credential struct {
+	// Name is the header name, e.g. "Cookie" or "Authorization".
+	Name string
+	// Value is the header value.
+	Value string
 }
 
 // Client sends requests and normalises the results into httpmsg types.
@@ -251,7 +269,37 @@ func (c *Client) buildRequest(ctx context.Context, req *httpmsg.Request) (*http.
 		httpReq.Header.Set("Accept", "*/*")
 	}
 
+	c.applyCredentials(httpReq)
+
 	return httpReq, nil
+}
+
+// applyCredentials adds the configured identity to an outgoing request.
+func (c *Client) applyCredentials(httpReq *http.Request) {
+	for _, cred := range c.opts.Credentials {
+		if cred.Name == "" || cred.Value == "" {
+			continue
+		}
+		if strings.EqualFold(cred.Name, "Cookie") {
+			// Cookies are merged rather than replaced. A request may carry its
+			// own — a CSRF token, a consent flag, a language preference — and
+			// dropping them would break the very session this exists to
+			// preserve.
+			if existing := httpReq.Header.Get("Cookie"); existing != "" {
+				httpReq.Header.Set("Cookie", existing+"; "+cred.Value)
+			} else {
+				httpReq.Header.Set("Cookie", cred.Value)
+			}
+			continue
+		}
+		// Every other header only fills a gap. A request that already names an
+		// identity is more specific than a command-line default, and overriding
+		// it would be the one thing a scanner must never do to an authenticated
+		// request.
+		if httpReq.Header.Get(cred.Name) == "" {
+			httpReq.Header.Set(cred.Name, cred.Value)
+		}
+	}
 }
 
 // userAgent returns the User-Agent to send.
@@ -262,7 +310,7 @@ func (c *Client) userAgent() string {
 	if c.opts.UserAgent != "" {
 		return c.opts.UserAgent
 	}
-	return DefaultUserAgent
+	return DefaultUserAgent()
 }
 
 // readBody reads a response body up to max bytes, transparently gunzipping when
@@ -321,23 +369,89 @@ func retryable(err error) bool {
 	return false
 }
 
-// randomUserAgent picks from the built-in pool.
-func randomUserAgent() string {
-	return userAgents[rand.IntN(len(userAgents))]
+// DefaultUserAgent identifies crackweb clearly in target logs.
+//
+// It is the default because being identified is the honest thing: a scan should
+// be visible to whoever runs the target, and a scanner that hides by default
+// would be built for the wrong purpose. Users who have a reason to rotate — a
+// lab that treats scanner fingerprints as noise in its own logs, a WAF test
+// where the point is the payload rather than the client — can ask for it.
+func DefaultUserAgent() string {
+	return "crackweb/" + version.Version
 }
 
-// DefaultUserAgent identifies crackweb clearly in target logs, which is the
-// honest thing to do and makes a scan easy to spot and stop.
-const DefaultUserAgent = "crackweb/0.1"
+// userAgentPools are combined to build a realistic pool, rather than listed as a
+// finished set.
+//
+// A fixed list is a fingerprint in itself: eight entries means every request
+// from this tool carries one of eight strings, and after a minute of scanning
+// that is as recognisable as shipping its own name. Composing the pool from the
+// parts real browsers advertise — engine, platform, version — yields hundreds of
+// well-formed combinations, so rotation looks like the traffic a site already
+// receives instead of like a scanner picking from a list.
+var (
+	// Chromium-based, which is most of the web.
+	chromeVersions = []string{"131.0.0.0", "130.0.0.0", "129.0.0.0", "127.0.0.0", "126.0.0.0", "125.0.0.0"}
+	edgeVersions   = []string{"131.0.0.0", "130.0.0.0", "129.0.0.0", "127.0.0.0"}
+	firefoxVersion = []string{"133.0", "132.0", "131.0", "130.0", "129.0", "128.0"}
+	safariVersions = []string{"18.1", "18.0", "17.6", "17.5", "17.4"}
 
-// userAgents is the pool used when random rotation is requested.
-var userAgents = []string{
-	"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-	"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36 Edg/120.0.0.0",
-	"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Safari/605.1.15",
-	"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
-	"Mozilla/5.0 (X11; Linux x86_64; rv:125.0) Gecko/20100101 Firefox/125.0",
-	"Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:124.0) Gecko/20100101 Firefox/124.0",
-	"Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Mobile/15E148 Safari/604.1",
-	"Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36",
+	windowsPlatforms = []string{
+		"Windows NT 10.0; Win64; x64",
+		"Windows NT 10.0; WOW64",
+		"Windows NT 11.0; Win64; x64",
+	}
+	macPlatforms = []string{
+		"Macintosh; Intel Mac OS X 10_15_7",
+		"Macintosh; Intel Mac OS X 14_6_1",
+		"Macintosh; Intel Mac OS X 13_6_4",
+	}
+	linuxPlatforms = []string{
+		"X11; Linux x86_64",
+		"X11; Ubuntu; Linux x86_64",
+		"X11; Fedora; Linux x86_64",
+	}
+	mobilePlatforms = []string{
+		"Linux; Android 14; Pixel 8",
+		"Linux; Android 13; SM-S918B",
+		"Linux; Android 14; SM-S928B",
+	}
+)
+
+// randomUserAgent composes a plausible User-Agent on each call.
+//
+// Composed rather than drawn from a list, and composed fresh each time rather
+// than once per client: a scanner that picks one identity and keeps it produces
+// the same grouping in a log as a scanner that sends its own name.
+func randomUserAgent() string {
+	chromeLike := func(platform string, token string) string {
+		return "Mozilla/5.0 (" + platform + ") AppleWebKit/537.36 (KHTML, like Gecko) Chrome/" +
+			token + " Safari/537.36"
+	}
+	pick := func(values []string) string { return values[rand.IntN(len(values))] }
+
+	switch rand.IntN(10) {
+	case 0, 1, 2, 3:
+		return chromeLike(pick(append(append([]string{}, windowsPlatforms...), macPlatforms...)), pick(chromeVersions))
+	case 4:
+		return chromeLike(pick(windowsPlatforms), pick(edgeVersions)) + " Edg/" + pick(edgeVersions)
+	case 5:
+		return "Mozilla/5.0 (" + pick(macPlatforms) + ") AppleWebKit/605.1.15 (KHTML, like Gecko) Version/" +
+			pick(safariVersions) + " Safari/605.1.15"
+	case 6, 7:
+		return "Mozilla/5.0 (" + pick(linuxPlatforms) + "; rv:" + pick(firefoxVersion) +
+			") Gecko/20100101 Firefox/" + pick(firefoxVersion)
+	case 8:
+		return "Mozilla/5.0 (" + pick(windowsPlatforms) + "; rv:" + pick(firefoxVersion) +
+			") Gecko/20100101 Firefox/" + pick(firefoxVersion)
+	default:
+		return chromeLike(pick(mobilePlatforms), pick(chromeVersions)) + " Mobile Safari/537.36"
+	}
+}
+
+// userAgentPoolSize reports how many distinct values the composer can produce,
+// which is what the tests assert on.
+func userAgentPoolSize() int {
+	return len(chromeVersions) + len(edgeVersions) + len(firefoxVersion) + len(safariVersions) +
+		len(windowsPlatforms) + len(macPlatforms) + len(linuxPlatforms) + len(mobilePlatforms)
 }

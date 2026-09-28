@@ -110,3 +110,70 @@ func TestCleartextPasswordReportsEachFieldOnce(t *testing.T) {
 		t.Fatalf("got %d findings, want 2 (one per field)", len(findings))
 	}
 }
+
+// jsonTarget builds a Target with a JSON body.
+func jsonTarget(t *testing.T, rawURL, body string) *checks.Target {
+	t.Helper()
+	request, err := httpmsg.NewRequest("POST", rawURL)
+	if err != nil {
+		t.Fatalf("NewRequest: %v", err)
+	}
+	request.Body = []byte(body)
+	request.Header.Set("Content-Type", "application/json")
+	return &checks.Target{Request: request}
+}
+
+// TestCleartextPasswordFindsJSONBody: a login endpoint taking application/json
+// is not a set of form parameters, so the parameter parser never sees it.
+func TestCleartextPasswordFindsJSONBody(t *testing.T) {
+	findings := runCleartext(t, jsonTarget(t, "http://api.example.com/session",
+		`{"username":"alice","password":"hunter2"}`))
+	if len(findings) != 1 {
+		t.Fatalf("got %d findings, want 1", len(findings))
+	}
+	if !strings.Contains(strings.Join(findings[0].Evidence.Matches, " "), "json") {
+		t.Errorf("the location was not reported as the JSON body: %v", findings[0].Evidence.Matches)
+	}
+}
+
+// TestCleartextPasswordNeverEchoesAJSONValue: the same promise as for form
+// fields — a report is a document that travels.
+func TestCleartextPasswordNeverEchoesAJSONValue(t *testing.T) {
+	const secret = "JsonSecret-98765"
+	findings := runCleartext(t, jsonTarget(t, "http://api.example.com/session",
+		`{"user":"alice","password":"`+secret+`"}`))
+	if len(findings) == 0 {
+		t.Fatal("no finding")
+	}
+	f := findings[0]
+	haystack := strings.Join([]string{
+		f.Title, f.Description, f.Remediation, f.Payload, f.URL,
+		strings.Join(f.Evidence.Matches, " "),
+		string(f.Evidence.Request), string(f.Evidence.Response),
+	}, " ")
+	if strings.Contains(haystack, secret) {
+		t.Errorf("the JSON password value reached the finding:\n%s", haystack)
+	}
+}
+
+// TestCleartextPasswordIgnoresNonCredentialJSON: unrelated JSON must not trip it.
+func TestCleartextPasswordIgnoresNonCredentialJSON(t *testing.T) {
+	for _, body := range []string{
+		`{"title":"hello","body":"world"}`,
+		`{"password":""}`,
+		`{"passenger":{"name":"alice"}}`,
+		`not json at all`,
+	} {
+		if findings := runCleartext(t, jsonTarget(t, "http://api.example.com/x", body)); len(findings) != 0 {
+			t.Errorf("%s was reported: %v", body, findings[0].Evidence.Matches)
+		}
+	}
+}
+
+// TestCleartextPasswordIgnoresJSONOverHTTPS: the transport is still what matters.
+func TestCleartextPasswordIgnoresJSONOverHTTPS(t *testing.T) {
+	if findings := runCleartext(t, jsonTarget(t, "https://api.example.com/session",
+		`{"password":"hunter2"}`)); len(findings) != 0 {
+		t.Errorf("JSON over HTTPS was reported: %v", findings[0].Evidence.Matches)
+	}
+}

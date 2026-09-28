@@ -9,6 +9,7 @@ package passive
 
 import (
 	"context"
+	"encoding/json"
 	"regexp"
 	"strings"
 
@@ -409,6 +410,43 @@ func orNone(value string) string {
 	return value
 }
 
+// credentialField is one credential-bearing field, wherever it was found.
+type credentialField struct {
+	name  string
+	where string
+	value string
+}
+
+// jsonCredentialFields finds credential fields inside a JSON request body.
+//
+// Only the top level is inspected: that is where a login payload puts its
+// fields, and walking deeper would start reporting objects that merely contain a
+// key called "password" without being one.
+func jsonCredentialFields(req *httpmsg.Request) []credentialField {
+	if req == nil || len(req.Body) == 0 {
+		return nil
+	}
+	if ct := req.Header.Get("Content-Type"); !strings.Contains(strings.ToLower(ct), "json") {
+		return nil
+	}
+	var object map[string]any
+	if err := json.Unmarshal(req.Body, &object); err != nil {
+		return nil
+	}
+	var out []credentialField
+	for name, raw := range object {
+		if !passwordFieldNames[strings.ToLower(strings.TrimSpace(name))] {
+			continue
+		}
+		value, ok := raw.(string)
+		if !ok || strings.TrimSpace(value) == "" {
+			continue
+		}
+		out = append(out, credentialField{name: name, where: "json body", value: value})
+	}
+	return out
+}
+
 // headRaw truncates a request's bytes for evidence.
 func headRaw(raw []byte, n int) []byte {
 	if len(raw) <= n {
@@ -480,7 +518,10 @@ func (cleartextPassword) Run(_ context.Context, _ *checks.Context, t *checks.Tar
 	// request line reproduced as evidence would otherwise carry them verbatim —
 	// which would turn a finding about transport into a second disclosure, in a
 	// document that gets attached to tickets and mailed around.
-	var secrets []string
+	var (
+		secrets []string
+		fields  []credentialField
+	)
 	for _, param := range t.Request.Params() {
 		if !passwordFieldNames[strings.ToLower(strings.TrimSpace(param.Name))] {
 			continue
@@ -491,6 +532,16 @@ func (cleartextPassword) Run(_ context.Context, _ *checks.Context, t *checks.Tar
 		if param.Value != "" && param.Value != param.RawValue {
 			secrets = append(secrets, param.Value)
 		}
+		if strings.TrimSpace(param.Value) != "" {
+			fields = append(fields, credentialField{name: param.Name, where: string(param.In)})
+		}
+	}
+	// A JSON body is not a set of parameters: the parser does not reach into it,
+	// and a login endpoint that takes application/json would otherwise look like
+	// a request carrying no credentials at all.
+	for _, field := range jsonCredentialFields(t.Request) {
+		secrets = append(secrets, field.value)
+		fields = append(fields, credentialField{name: field.name, where: "json body"})
 	}
 	redacted := string(headRaw(t.Request.Raw(), 4096))
 	for _, secret := range secrets {
@@ -499,25 +550,18 @@ func (cleartextPassword) Run(_ context.Context, _ *checks.Context, t *checks.Tar
 
 	var findings []*finding.Finding
 	seen := map[string]bool{}
-	for _, param := range t.Request.Params() {
-		if !passwordFieldNames[strings.ToLower(strings.TrimSpace(param.Name))] {
+	for _, field := range fields {
+		if seen[field.name] {
 			continue
 		}
-		// An empty field is not a credential being transmitted.
-		if strings.TrimSpace(param.Value) == "" {
-			continue
-		}
-		if seen[param.Name] {
-			continue
-		}
-		seen[param.Name] = true
+		seen[field.name] = true
 
 		f := checks.NewFinding(cleartextPassword{}, t,
 			i18n.KeyCheckCleartextPasswordTitle, i18n.KeyCheckCleartextPasswordDesc, i18n.KeyCheckCleartextPasswordFix)
 		f.Confidence = finding.ConfidenceCertain
 		// The field name is what distinguishes one instance from another on the
 		// same URL; the value is deliberately left out.
-		f.DedupExtra = param.Name
+		f.DedupExtra = field.name
 		f.Evidence.Request = []byte(redacted)
 		f.Evidence.Response = headBytes(t.Response, 2048)
 		// The URL is rendered in report headings and in the finding's own
@@ -527,9 +571,9 @@ func (cleartextPassword) Run(_ context.Context, _ *checks.Context, t *checks.Tar
 			f.URL = strings.ReplaceAll(f.URL, secret, "[redacted]")
 		}
 		f.Evidence.Matches = []string{
-			"the field " + param.Name + " carried a value over " + t.Request.Scheme() + "://" +
+			"the field " + field.name + " carried a value over " + t.Request.Scheme() + "://" +
 				t.Request.Hostname() + " (the value itself is not reproduced here)",
-			"field location: " + string(param.In),
+			"field location: " + field.where,
 		}
 		findings = append(findings, f)
 	}

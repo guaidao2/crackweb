@@ -232,6 +232,40 @@ crackweb scan -u https://example.com --no-waf    # 关闭探测与变形
 | **二次注入** | 用一个请求把 payload 写进去，再重放**已观察到的**页面，看读回它时是否破坏了什么。比对基准是这些页面在写入**之前**的响应，所以证据是"写入造成的改变"。 |
 | **带外盲测** | 盲 SSRF、命令注入、XXE 在响应里什么都不留。每次探测植入一个唯一回调地址，证据随后从另一个监听器到达。 |
 
+## 登录态扫描
+
+对匿名爬虫来说，登录后的一切都是不可见的；而瞄准匿名视图的检测，测的是错误的那一面。
+给客户端一个身份，它就会在每个请求上带着它 —— 包括检测项自己构造的请求：
+
+```sh
+crackweb crawl -u https://app.example.com --cookie "session=abc; csrf=xyz"
+crackweb crawl -u https://app.example.com --header "Authorization: Bearer eyJ..."
+crackweb crawl -u https://staging.example.com --basic-auth alice:s3cret
+```
+
+- `-C, --cookie` 会与请求自带的 Cookie **合并**，
+  因为丢掉一个 CSRF token 就毁掉了它本该维持的那个会话。
+- `-H, --header` 可重复，且**只补空缺**：
+  请求自己声明的身份比命令行默认值更具体，绝不被覆盖。
+- `--basic-auth` 接受 `user:password`；只有第一个冒号是分隔符，因为密码里本来就可能含冒号。
+
+`--sessions` 是另一回事。它接受两个或更多身份，供越权检测比较各自能访问到什么：
+
+```sh
+crackweb scan -u https://app.example.com/orders/1001 \
+  --sessions "Cookie: session=alice" --sessions "Cookie: session=bob"
+```
+
+## User-Agent
+
+默认情况下 crackweb 会表明自己是谁，所以扫描会留痕在目标日志里。
+对一个用于「你有权测试的系统」的工具来说，这是诚实的默认值。
+
+`--random-ua` 则改为**为每个请求现编一个合理的 User-Agent**。
+池子由真实浏览器对外宣称的各个部分（引擎、平台、版本）**组合**而成，而不是一份固定清单 ——
+因为短清单本身就是指纹。适用场景：工具自己的名字会污染你要看的日志，
+或者不希望扫描流量因某个固定请求头而被归组。
+
 ## 模板
 
 crackweb 可以直接运行 **nuclei 兼容的 YAML 模板**，公开模板库无需改写即可复用：

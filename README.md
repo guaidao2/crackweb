@@ -252,6 +252,46 @@ from a fuzzer:
 | **Second-order injection** | A payload is written through one request and the *already-observed* pages are replayed to see whether reading it back broke something. Compared against what those pages returned **before** the write, so the evidence is the change the write caused. |
 | **Blind testing by callback** | A blind SSRF, command injection or XXE leaves nothing in the response. Each attempt plants a unique callback address and the proof arrives later, on a separate listener. |
 
+## Authenticated scanning
+
+Everything behind a login is invisible to a crawler that arrives anonymously, and
+every check aimed at an anonymous view tests the wrong surface. Give the client an
+identity and it carries it on every request — including the ones checks build
+themselves:
+
+```sh
+crackweb crawl -u https://app.example.com --cookie "session=abc; csrf=xyz"
+crackweb crawl -u https://app.example.com --header "Authorization: Bearer eyJ..."
+crackweb crawl -u https://staging.example.com --basic-auth alice:s3cret
+```
+
+- `-C, --cookie` is merged into any cookie the request already carries, because
+  dropping a CSRF token would break the session this exists to preserve.
+- `-H, --header` is repeatable, and only fills a gap: a request that already names
+  an identity is more specific than a command-line default and is never overridden.
+- `--basic-auth` takes `user:password`; only the first colon separates them, since
+  passwords contain colons.
+
+`--sessions` is a different thing. It takes two or more identities and is used by
+the access-control check to compare what each of them can reach:
+
+```sh
+crackweb scan -u https://app.example.com/orders/1001 \
+  --sessions "Cookie: session=alice" --sessions "Cookie: session=bob"
+```
+
+## User-Agent
+
+By default crackweb identifies itself, so a scan is visible in the target's logs.
+That is the honest default for a tool meant to be run on systems you are allowed to
+test.
+
+`--random-ua` composes a fresh, plausible User-Agent for every request instead. The
+pool is built from the parts real browsers advertise — engine, platform, version —
+rather than a fixed list, because a short list is itself a fingerprint. Use it when
+the tool's own name would pollute a log you are reviewing, or when a scan must not be
+grouped by a stable header.
+
 ## Templates
 
 crackweb runs **nuclei-compatible YAML templates**, so the published template corpus

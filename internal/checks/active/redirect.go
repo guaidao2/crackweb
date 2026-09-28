@@ -2,6 +2,7 @@ package active
 
 import (
 	"context"
+	"regexp"
 	"strings"
 
 	"github.com/guaidao2/crackweb/internal/checks"
@@ -59,12 +60,8 @@ func (openRedirect) Run(ctx context.Context, c *checks.Context, t *checks.Target
 	var location string
 	attempt, err := c.SendVariants(ctx, t, payload.Redirect, "open-redirect", redirectSeeds,
 		func(_ *httpmsg.Request, resp *httpmsg.Response, _ payload.Variant) bool {
-			redirect := resp.Header.Get("Location")
-			if !resp.IsRedirect() || !strings.Contains(redirect, redirectCanary) {
-				return false
-			}
-			location = redirect
-			return true
+			location = redirectTarget(resp)
+			return location != ""
 		})
 	if err != nil || attempt == nil {
 		return nil
@@ -82,8 +79,86 @@ func (openRedirect) Run(ctx context.Context, c *checks.Context, t *checks.Target
 	}
 	f.Evidence.Request = attempt.Request.Raw()
 	f.Evidence.Response = truncate(attempt.Response.Raw(), 4096)
-	f.Evidence.Matches = []string{"Location: " + location, variantNote(c, attempt)}
+	f.Evidence.Matches = []string{"redirects to: " + location, variantNote(c, attempt)}
 	return []*finding.Finding{f}
+}
+
+// redirectSinks are the constructs that actually send a browser somewhere.
+//
+// They are patterns rather than bare words, and that distinction is the whole
+// reason this check is usable. A word like "location" or "url=" appears in pages
+// for a dozen innocent reasons — a link, a field label, an error message that
+// quotes a request — and treating any of them as a redirect turns every echoing
+// page into a finding. What is left here are the two things that move a user:
+// a script assigning to location, and a refresh directive, whether it arrives in
+// a header or in a meta tag.
+var redirectSinks = []*regexp.Regexp{
+	// window.location = "…" / location.href = "…" / location.replace("…")
+	regexp.MustCompile(`(?is)(window\s*\.\s*)?location\s*(\.\s*(href|replace|assign)\s*[=(]|=)`),
+	// <meta http-equiv="refresh" content="0;url=…"> and the Refresh header.
+	regexp.MustCompile(`(?is)http-equiv\s*=\s*["']?\s*refresh`),
+	regexp.MustCompile(`(?is)refresh\s*[:=]\s*["']?\s*\d`),
+}
+
+// redirectTarget reports where a response sends the visitor, if it canary is
+// redirected to at all.
+//
+// A redirect is not only a 3xx with a Location header. The same thing is
+// expressed with a Refresh header, with a meta refresh in the document, and with
+// a script that assigns to location — and a target that only writes one of the
+// less common forms is not a target without an open redirect, it is a target an
+// incomplete check misses.
+//
+// A bare occurrence of the canary in the body does not count, because a page
+// that echoes its input would then look like every other page. What counts is
+// the canary appearing near a word that marks the spot as a destination, which
+// is why the search looks at the text around each occurrence rather than at the
+// response as a whole.
+func redirectTarget(resp *httpmsg.Response) string {
+	if resp == nil {
+		return ""
+	}
+	if location := resp.Header.Get("Location"); strings.Contains(location, redirectCanary) {
+		return location
+	}
+	if refresh := resp.Header.Get("Refresh"); strings.Contains(refresh, redirectCanary) {
+		return "Refresh: " + refresh
+	}
+	if len(resp.Body) == 0 || !strings.Contains(string(resp.Body), redirectCanary) {
+		return ""
+	}
+	body := string(resp.Body)
+	for offset := 0; ; {
+		index := strings.Index(body[offset:], redirectCanary)
+		if index < 0 {
+			return ""
+		}
+		index += offset
+		offset = index + len(redirectCanary)
+
+		// A canary in a relative path stays on the same site: "/crackweb-…"
+		// sends the browser to a page of the target's own, which is not an open
+		// redirect whatever construct carries it.
+		if index > 0 && body[index-1] == '/' {
+			continue
+		}
+		// The window is short on purpose. A redirect names its destination right
+		// after the construct that performs it — url=…, location.href = … — so
+		// the canary has to sit close to the sink to count. A wider window was
+		// tried and produced false findings on every page that both echoes its
+		// input and happens to contain an unrelated refresh somewhere: the two
+		// facts are unrelated, but a 240-byte search happily joins them.
+		start := index - 48
+		if start < 0 {
+			start = 0
+		}
+		window := body[start:index]
+		for _, sink := range redirectSinks {
+			if sink.MatchString(window) {
+				return extractAround(body, redirectCanary, 120)
+			}
+		}
+	}
 }
 
 // crlfHeaderName is the header the injection tries to introduce. A name that does

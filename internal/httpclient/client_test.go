@@ -4,9 +4,11 @@ import (
 	"compress/gzip"
 	"context"
 	"fmt"
+	"github.com/guaidao2/crackweb/internal/version"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -52,7 +54,7 @@ func TestDoGet(t *testing.T) {
 	if !strings.Contains(body, "path=/hello") {
 		t.Errorf("body = %q, want it to carry the path", body)
 	}
-	if !strings.Contains(body, DefaultUserAgent) {
+	if !strings.Contains(body, DefaultUserAgent()) {
 		t.Errorf("body = %q, want crackweb's User-Agent", body)
 	}
 	if resp.Duration <= 0 {
@@ -280,5 +282,132 @@ func TestRequestWithoutURLFails(t *testing.T) {
 	client, _ := New(Options{})
 	if _, err := client.Do(context.Background(), &httpmsg.Request{Method: "GET"}); err == nil {
 		t.Error("request without a URL was sent")
+	}
+}
+
+// TestCredentialsAreAppliedToEveryRequest: the point of setting an identity on
+// the client is that checks which build their own requests carry it too.
+func TestCredentialsAreAppliedToEveryRequest(t *testing.T) {
+	var seen string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seen = r.Header.Get("Cookie")
+		fmt.Fprint(w, "ok")
+	}))
+	defer server.Close()
+
+	client, err := New(Options{Credentials: []Credential{{Name: "Cookie", Value: "session=abc"}}})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if _, err := client.Do(context.Background(), request(t, "GET", server.URL+"/x", "")); err != nil {
+		t.Fatalf("Do: %v", err)
+	}
+	if seen != "session=abc" {
+		t.Errorf("Cookie = %q, want %q", seen, "session=abc")
+	}
+}
+
+// TestCookieIsMergedNotReplaced: a request may carry its own cookies — a CSRF
+// token, a consent flag — and dropping them would break the very session the
+// credential is meant to preserve.
+func TestCookieIsMergedNotReplaced(t *testing.T) {
+	var seen string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seen = r.Header.Get("Cookie")
+		fmt.Fprint(w, "ok")
+	}))
+	defer server.Close()
+
+	client, err := New(Options{Credentials: []Credential{{Name: "Cookie", Value: "session=abc"}}})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	req := request(t, "GET", server.URL+"/x", "")
+	req.Header.Set("Cookie", "csrf=xyz")
+	if _, err := client.Do(context.Background(), req); err != nil {
+		t.Fatalf("Do: %v", err)
+	}
+	if !strings.Contains(seen, "csrf=xyz") || !strings.Contains(seen, "session=abc") {
+		t.Errorf("Cookie = %q, want both csrf=xyz and session=abc", seen)
+	}
+}
+
+// TestExistingAuthorizationIsNotOverridden: a request that already names an
+// identity is more specific than a client-wide default.
+func TestExistingAuthorizationIsNotOverridden(t *testing.T) {
+	var seen string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seen = r.Header.Get("Authorization")
+		fmt.Fprint(w, "ok")
+	}))
+	defer server.Close()
+
+	client, err := New(Options{Credentials: []Credential{{Name: "Authorization", Value: "Basic Zm9vOmJhcg=="}}})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	req := request(t, "GET", server.URL+"/x", "")
+	req.Header.Set("Authorization", "Bearer request-token")
+	if _, err := client.Do(context.Background(), req); err != nil {
+		t.Fatalf("Do: %v", err)
+	}
+	if seen != "Bearer request-token" {
+		t.Errorf("Authorization = %q; the request's own value must win", seen)
+	}
+}
+
+// TestRandomUAComposesRatherThanRepeats: rotation only defeats fingerprinting if
+// the values are varied and well-formed. A short fixed list is a fingerprint of
+// its own.
+func TestRandomUAComposesRatherThanRepeats(t *testing.T) {
+	seen := map[string]bool{}
+	for i := 0; i < 400; i++ {
+		ua := randomUserAgent()
+		if !strings.HasPrefix(ua, "Mozilla/5.0 (") {
+			t.Fatalf("composed a User-Agent that no browser would send: %q", ua)
+		}
+		if strings.Contains(strings.ToLower(ua), "crackweb") {
+			t.Fatalf("the rotated pool leaks the tool's name: %q", ua)
+		}
+		seen[ua] = true
+	}
+	// Not a statistical claim: just enough distinct values that a log cannot
+	// group the traffic by this field.
+	if len(seen) < 20 {
+		t.Errorf("400 calls produced only %d distinct User-Agents", len(seen))
+	}
+}
+
+// TestRandomUAVariesPerRequest: one identity per client is the same problem at a
+// larger scale — it still groups every request together.
+func TestRandomUAVariesPerRequest(t *testing.T) {
+	var seen = map[string]bool{}
+	var mu sync.Mutex
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		seen[r.UserAgent()] = true
+		mu.Unlock()
+		fmt.Fprint(w, "ok")
+	}))
+	defer server.Close()
+
+	client, err := New(Options{RandomUA: true})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	for i := 0; i < 40; i++ {
+		if _, err := client.Do(context.Background(), request(t, "GET", server.URL+"/x", "")); err != nil {
+			t.Fatalf("Do: %v", err)
+		}
+	}
+	if len(seen) < 5 {
+		t.Errorf("40 requests carried only %d distinct User-Agents", len(seen))
+	}
+}
+
+// TestDefaultUserAgentCarriesTheVersion: the banner and the wire should agree.
+func TestDefaultUserAgentCarriesTheVersion(t *testing.T) {
+	if !strings.Contains(DefaultUserAgent(), version.Version) {
+		t.Errorf("DefaultUserAgent() = %q, want it to contain %q", DefaultUserAgent(), version.Version)
 	}
 }

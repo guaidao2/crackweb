@@ -419,4 +419,8 @@ var chinese = map[Key]string{
 	KeyCheckCleartextPasswordFix: "让整个应用走 HTTPS，并把 http:// 重定向过去，" +
 		"同时启用 HSTS 以免重定向被剥离。" +
 		"在此之前，任何以这种方式提交过的凭据都应视为已泄露。",
+	KeyFlagCookie:    "随每个请求发送的会话 Cookie，例如 session=abc; csrf=xyz。可重复；多写一个前导的 Cookie: 也能识别。",
+	KeyFlagHeader:    "随每个请求发送的额外请求头，格式为 名称: 值。可重复 —— 用于 Bearer token、API key 等。",
+	KeyFlagBasicAuth: "HTTP Basic 凭据，格式 user:password，会以 Authorization 头发送。",
+	KeyFlagRandomUA:  "为每个请求现编一个合理的 User-Agent，而不是以 crackweb 标识自身。适合两种情况：工具自己的名字会污染你要看的日志，或者不想让扫描流量因固定指纹而被归组。",
 }
