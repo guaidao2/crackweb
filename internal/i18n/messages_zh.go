@@ -565,13 +565,15 @@ var chinese = map[Key]string{
 	KeyFlagHeader:            "随每个请求发送的额外请求头，格式为 名称: 值。可重复 —— 用于 Bearer token、API key 等。",
 	KeyFlagBasicAuth:         "HTTP Basic 凭据，格式 user:password，会以 Authorization 头发送。",
 	KeyFlagRandomUA:          "为每个请求现编一个合理的 User-Agent，而不是以 crackweb 标识自身。适合两种情况：工具自己的名字会污染你要看的日志，或者不想让扫描流量因固定指纹而被归组。",
-	KeyCheckSQLiOrderByTitle: "SQL 注入（ORDER BY / LIMIT）",
-	KeyCheckSQLiOrderByDesc: "用于指定排序列或行数上限的参数被拼进了查询。" +
-		"这个位置无法用别处那套办法修 —— 列名没法参数化 —— " +
+	KeyCheckSQLiOrderByTitle: "SQL 注入（ORDER BY）",
+	KeyCheckSQLiOrderByDesc: "用于指定排序列的参数被拼进了 ORDER BY 子句。" +
+		"这个位置无法用别处那套办法修 —— 列名没法绑定 —— " +
 		"所以即使框架把其他所有输入都参数化了，这个洞依然在；" +
-		"也正因如此，其他的 SQL 检测看不到它：这个子句不接受带引号的字符串，也无法用 UNION 续接。",
+		"也正因如此，其他的 SQL 检测看不到它：该子句不接受带引号的字符串，也无法用 UNION 续接。" +
+		"判定依据来自子句自身的行为：追加在范围之内的排序项被接受、页面不变，" +
+		"而超出结果集列数的列序号被拒绝。",
 	KeyCheckSQLiOrderByFix: "把调用方的取值映射到一份固定的允许列名清单，而不是直接透传。" +
-		"行数上限则绑定为整数。",
+		"行数上限是另一个位置：绑定为整数，交给分页检查去发现。",
 	KeyCheckXSSStoredTitle: "存储型 XSS",
 	KeyCheckXSSStoredDesc: "提交给应用的值被保存下来，之后又作为标记语言返回给访问者，" +
 		"于是脚本在对方的浏览器里执行。与反射型不同，这个 payload 会持久存在：" +

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/guaidao2/crackweb/internal/browser"
@@ -187,6 +188,20 @@ func (o *requestOptions) scanContext(ctx context.Context, app *App, client *http
 
 	engine := diff.NewEngine(thresholds, diff.DefaultKeywords())
 	checkCtx := checks.NewContext(client, app.Bundle, engine, normalizer)
+	// --verbose prints every request the checks send, which is what the flag
+	// promises. The lines go to stderr so that a report on stdout stays
+	// parseable, and the lock is needed because the checks run side by side.
+	if *o.verbose {
+		var printing sync.Mutex
+		checkCtx.OnRequest = func(req *httpmsg.Request) {
+			printing.Lock()
+			defer printing.Unlock()
+			fmt.Fprintf(app.Stderr, "--> %s %s\n", req.Method, req.URLString())
+			if len(req.Body) > 0 {
+				fmt.Fprintf(app.Stderr, "    body: %s\n", truncateForDisplay(string(req.Body), 300))
+			}
+		}
+	}
 	checkCtx.OOB = provider
 	// A check that needs the page run in a browser is only a question away from one; the
 	// process itself starts on the first probe, so a scan that never asks pays nothing.

@@ -80,6 +80,15 @@ type Context struct {
 	// themselves rather than guessing.
 	Exchanges func() []Exchange
 
+	// OnRequest, when set, is called with every request the checks send, just
+	// before it goes out.
+	//
+	// It is what --verbose prints, and it lives here rather than in each check
+	// because every request any check sends goes through Do. Calls arrive from the
+	// checks running side by side, so an implementation that writes somewhere has
+	// to serialise itself. A nil value means nothing is watched.
+	OnRequest func(*httpmsg.Request)
+
 	mu       sync.Mutex
 	requests int
 	failures []string
@@ -129,7 +138,15 @@ func (c *Context) FailureCount() int {
 func (c *Context) Do(ctx context.Context, req *httpmsg.Request) (*httpmsg.Response, error) {
 	c.mu.Lock()
 	c.requests++
+	watch := c.OnRequest
 	c.mu.Unlock()
+
+	// Called outside the lock, and with the hook copied out of it: the hook
+	// belongs to the caller, and holding the counter's lock across it would
+	// serialise every check on whatever the hook writes.
+	if watch != nil && req != nil {
+		watch(req)
+	}
 
 	resp, err := c.Client.Do(ctx, req)
 	if err != nil && ctx.Err() == nil {

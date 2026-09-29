@@ -325,6 +325,12 @@ func nosqlBooleanOracle(ctx context.Context, c *checks.Context, t *checks.Target
 		fp := func(i int) *diff.Fingerprint {
 			return c.Fingerprint(branches[i], echoRestore(values[i], t.Param.Value)...)
 		}
+		// baseUnder fingerprints the baseline with the same restore list a branch used,
+		// for the same reason as the SQL boolean check: a restore applied to one side of
+		// a comparison only invents a difference.
+		baseUnder := func(i int) *diff.Fingerprint {
+			return c.Fingerprint(t.Response, echoRestore(values[i], t.Param.Value)...)
+		}
 		trueOne, trueTwo := fp(0), fp(1)
 		falseOne, falseTwo := fp(2), fp(3)
 
@@ -338,12 +344,12 @@ func nosqlBooleanOracle(ctx context.Context, c *checks.Context, t *checks.Target
 		if trueOne.NormHash == falseOne.NormHash {
 			continue
 		}
-		if family.anchored && trueOne.NormHash != base.NormHash {
+		if family.anchored && trueOne.NormHash != baseUnder(0).NormHash {
 			continue
 		}
 
-		simTrue := diff.CompareFingerprints(base, trueOne).Score
-		simFalse := diff.CompareFingerprints(base, falseOne).Score
+		simTrue := diff.CompareFingerprints(baseUnder(0), trueOne).Score
+		simFalse := diff.CompareFingerprints(baseUnder(2), falseOne).Score
 		simBetween := diff.CompareFingerprints(trueOne, falseOne).Score
 
 		f := nosqlFinding(c, t, requests[0], branches[2], values[2], "boolean oracle")

@@ -642,14 +642,17 @@ var english = map[Key]string{
 	KeyFlagHeader:            "Extra header sent with every request, in Name: value form. Repeatable - use it for bearer tokens and API keys.",
 	KeyFlagBasicAuth:         "HTTP Basic credentials as user:password; sent as an Authorization header.",
 	KeyFlagRandomUA:          "Compose a fresh, plausible User-Agent for every request instead of identifying as crackweb. Use it when the tool's own name would pollute a log you are reviewing, or to keep a scan from being grouped by fingerprint.",
-	KeyCheckSQLiOrderByTitle: "SQL injection (ORDER BY / LIMIT)",
-	KeyCheckSQLiOrderByDesc: "A parameter that selects a sort column or a row limit was " +
-		"concatenated into the query. This position cannot be fixed the way the others can — a " +
-		"column name cannot be bound — which is why the flaw survives frameworks that " +
-		"parameterise everything else, and why the other SQL checks do not see it: the clause " +
-		"takes no quoted string and extends with no UNION.",
+	KeyCheckSQLiOrderByTitle: "SQL injection (ORDER BY)",
+	KeyCheckSQLiOrderByDesc: "A parameter that selects a sort column was concatenated into " +
+		"the ORDER BY clause. This position cannot be fixed the way the others can — a column " +
+		"name cannot be bound — which is why the flaw survives frameworks that parameterise " +
+		"everything else, and why the other SQL checks do not see it: the clause takes no " +
+		"quoted string and extends with no UNION. The finding rests on the clause's own " +
+		"behaviour: a term in range was accepted with the page left alone, and a column " +
+		"position past the end of the result set was refused.",
 	KeyCheckSQLiOrderByFix: "Map the caller's value onto a fixed list of allowed column names " +
-		"rather than passing it through. For a limit, bind an integer.",
+		"rather than passing it through. A row limit is a different position: bind it as an " +
+		"integer, which is what the pagination-bypass check looks for.",
 	KeyCheckXSSStoredTitle: "Stored cross-site scripting",
 	KeyCheckXSSStoredDesc: "A value submitted to the application was saved and later served back " +
 		"to a reader as markup, so the script runs in their browser. Unlike a reflected payload, " +

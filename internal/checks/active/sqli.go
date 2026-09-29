@@ -305,6 +305,14 @@ var booleanFamilies = []struct {
 // reason that has nothing to do with the query — which is exactly how a
 // confirmation check turns into a source of false findings. Both spellings are
 // therefore offered.
+//
+// The list has to be applied to *both* sides of a comparison, and that is the
+// part that is easy to get wrong: a replacement also matches page text the
+// application wrote for its own reasons — `1"` inside `size="1"`, `submit"`
+// inside `type="submit"` — so a restore applied to the probe alone shortens the
+// probe, leaves the baseline as it was, and manufactures a difference that is
+// not there. Every caller fingerprints the baseline with the same list, per
+// value; baseUnder in the boolean checks and in sqli_order_by is that symmetry.
 func echoRestore(sent, original string) []string {
 	pairs := []string{sent, original}
 	escapedSent := html.EscapeString(sent)
@@ -355,6 +363,14 @@ func (sqliBoolean) Run(ctx context.Context, c *checks.Context, t *checks.Target)
 	}
 
 	for _, family := range booleanFamilies {
+		// baseUnder returns the baseline fingerprinted the way a branch is: with the
+		// branch's own restore list. Applying the restore to one side of a comparison
+		// only is what turns page text the application wrote for its own reasons into
+		// a difference — see echoRestore.
+		baseUnder := func(value string) *diff.Fingerprint {
+			return c.Fingerprint(t.Response, echoRestore(value, t.Param.Value)...)
+		}
+
 		probe := func(suffix string) (booleanBranch, *httpmsg.Request, bool) {
 			value := prefix + suffix
 			request, response, err := c.Inject(ctx, t, value)
@@ -411,12 +427,12 @@ func (sqliBoolean) Run(ctx context.Context, c *checks.Context, t *checks.Target)
 		// An AND family also has to leave the original result intact in its true
 		// branch — otherwise the change could be the query breaking rather than
 		// the condition being honoured.
-		if family.anchored && trueOne.fp.NormHash != base.NormHash {
+		if family.anchored && trueOne.fp.NormHash != baseUnder(trueOne.value).NormHash {
 			continue
 		}
 
-		simTrue := diff.CompareFingerprints(base, trueOne.fp).Score
-		simFalse := diff.CompareFingerprints(base, falseOne.fp).Score
+		simTrue := diff.CompareFingerprints(baseUnder(trueOne.value), trueOne.fp).Score
+		simFalse := diff.CompareFingerprints(baseUnder(falseOne.value), falseOne.fp).Score
 		simBetween := diff.CompareFingerprints(trueOne.fp, falseOne.fp).Score
 
 		f := checks.NewFinding(sqliBoolean{}, t,

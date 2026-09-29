@@ -301,3 +301,60 @@ func TestVariantEncodingIsNotDoubled(t *testing.T) {
 		t.Error("a structural rewrite still needs transport encoding")
 	}
 }
+
+// TestTheRequestHookSeesEveryRequest is what --verbose prints: the hook has to
+// see each request a check sends, and it has to see it once. Do is the single
+// place every check's traffic passes through, which is why the hook lives there.
+func TestTheRequestHookSeesEveryRequest(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `<html><body>ok</body></html>`)
+	}))
+	defer server.Close()
+
+	client, err := httpclient.New(httpclient.Options{Timeout: 5 * time.Second})
+	if err != nil {
+		t.Fatalf("httpclient.New: %v", err)
+	}
+	normalizer, err := diff.New(diff.Options{})
+	if err != nil {
+		t.Fatalf("diff.New: %v", err)
+	}
+	c := NewContext(client, i18n.New(i18n.EN),
+		diff.NewEngine(diff.ThresholdsForSensitivity(3), diff.DefaultKeywords()), normalizer)
+
+	var (
+		mu   sync.Mutex
+		seen []string
+	)
+	c.OnRequest = func(req *httpmsg.Request) {
+		mu.Lock()
+		seen = append(seen, req.Method+" "+req.URLString())
+		mu.Unlock()
+	}
+
+	request, err := httpmsg.NewRequest("GET", server.URL+"/item?id=1")
+	if err != nil {
+		t.Fatalf("NewRequest: %v", err)
+	}
+	if _, err := c.Do(context.Background(), request); err != nil {
+		t.Fatalf("Do: %v", err)
+	}
+
+	params := request.Params()
+	if len(params) == 0 {
+		t.Fatal("the test request has no parameters")
+	}
+	target := &Target{Request: request, Param: &params[0]}
+	if _, _, err := c.Inject(context.Background(), target, "1,1"); err != nil {
+		t.Fatalf("Inject: %v", err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(seen) != 2 {
+		t.Fatalf("the hook saw %d request(s), want 2: %v", len(seen), seen)
+	}
+	if !strings.HasSuffix(seen[1], "id=1%2C1") {
+		t.Errorf("the hook saw %q, want the injected value", seen[1])
+	}
+}
