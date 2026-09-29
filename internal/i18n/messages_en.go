@@ -505,12 +505,15 @@ var english = map[Key]string{
 	KeyMsgTemplateUnsupported: "template %s uses features crackweb cannot run and was skipped: %s",
 	KeyMsgNoBrowser:           "no Chromium-based browser found, so the headless crawler is unavailable; continuing with the HTTP engine. Install Chrome, Chromium or Edge, point CRACKWEB_CHROME at a browser binary, or choose --engine http to silence this.",
 
-	KeyErrBadSensitivity:      "sensitivity must be between 1 and 5",
-	KeyErrNoChecks:            "none of the requested checks exist; use --list-checks to see them",
-	KeyErrLoadCA:              "could not load or create the CA: %v",
-	KeyErrReadRaw:             "could not read %s: %v",
-	KeyErrStartProxy:          "could not start the proxy: %v",
-	KeyEvidenceVariant:        "payload variant: %s (generation %d, transformations: %s)",
+	KeyErrBadSensitivity: "sensitivity must be between 1 and 5",
+	KeyErrNoChecks:       "none of the requested checks exist; use --list-checks to see them",
+	KeyErrLoadCA:         "could not load or create the CA: %v",
+	KeyErrReadRaw:        "could not read %s: %v",
+	KeyErrStartProxy:     "could not start the proxy: %v",
+	KeyEvidenceVariant:   "payload variant: %s (generation %d, transformations: %s)",
+	KeyEvidenceCSRF: "Replaced the anti-CSRF field %s with %s — a value the server could not " +
+		"have issued — and the request was still accepted (response %.0f%% identical to the " +
+		"baseline). A token the server never checks is decoration.",
 	KeyEvidenceWAF:            "the target is behind %s; payloads were escalated through %d mutation generation(s)",
 	KeyReportBoundaryTitle:    "Coverage boundary",
 	KeyReportUnanswered:       "Requests that never produced a response: %d",
@@ -524,6 +527,14 @@ var english = map[Key]string{
 	KeyMsgProbing:             "asking each host for an API description, robots.txt and a sitemap",
 	KeyMsgSelfDescribed:       "read %d description(s) and %d site file(s)",
 
+	KeyFlagAPIDoc: "Also ask for an API description at this path, in addition to the common " +
+		"ones. Sites publish them under names of their own — a version prefix, an internal " +
+		"name — and no guess finds those. Repeatable.",
+	KeyFlagAllowStateChange: "Also queue the endpoints a page's script only calls with POST, " +
+		"PUT, PATCH or DELETE. They are skipped by default: the crawler fetches what it " +
+		"discovers with GET, and a request to an address whose own script says \"delete\" is " +
+		"not obviously harmless to whatever is behind it — an upload form among them. The " +
+		"HTML forms a page declares are unaffected: they are submitted on their own path.",
 	KeyFlagNoDiscovery: "Skip asking for an API description, robots.txt or a sitemap; test only what the crawl reaches.",
 	KeyFlagNoAssumeWAF: "Keep WAF detection, but drop the assumption that a firewall is there: " +
 		"the extra generations are sent only when a refusal was actually detected. By default they " +

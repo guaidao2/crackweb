@@ -65,6 +65,12 @@ func (csrf) Run(ctx context.Context, c *checks.Context, t *checks.Target) []*fin
 	if token == nil {
 		return nil
 	}
+	// The runner visits the request once per parameter, but this check is about one field:
+	// the token. Without this it reports the same finding once per parameter of the request,
+	// which is how a single unprotected login form becomes half a dozen findings.
+	if !strings.EqualFold(t.Param.Name, token.Name) || t.Param.In != token.In {
+		return nil
+	}
 
 	// Replace the token with a value the server cannot have issued, keeping its
 	// length and alphabet so a length check cannot pass by accident.
@@ -98,10 +104,11 @@ func (csrf) Run(ctx context.Context, c *checks.Context, t *checks.Target) []*fin
 	f.Evidence.Request = mutated.Raw()
 	f.Evidence.Response = truncate(response.Body, 8192)
 	f.Evidence.Baseline = truncate(t.Response.Body, 4096)
+	f.Param = string(token.In) + ":" + token.Name
 	f.Evidence.Matches = []string{
 		"the token field " + token.Name + " was replaced with a value the server never issued, and the request still succeeded",
 	}
-	f.Evidence.Diff = c.Bundle.T(i18n.KeyEvidenceBoolean, round3(similarity), round3(similarity), round3(1))
+	f.Evidence.Diff = c.Bundle.T(i18n.KeyEvidenceCSRF, token.Name, forged, similarity*100)
 	return []*finding.Finding{f}
 }
 

@@ -257,6 +257,12 @@ func (infoDisclosure) Run(_ context.Context, _ *checks.Context, t *checks.Target
 	if t.Response == nil {
 		return nil
 	}
+	// A banner on an error page describes the server, not the application's configuration,
+	// and it is the same banner every 404 from that server carries. Reporting it here turns
+	// one fact into a finding per failed URL.
+	if t.Response.Status >= 400 {
+		return nil
+	}
 
 	var disclosed []string
 	for _, name := range disclosureHeaders {

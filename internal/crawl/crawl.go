@@ -65,6 +65,15 @@ type Options struct {
 	// description, robots.txt, a sitemap. It exists for a target where even one address the
 	// user did not name is one too many.
 	NoDiscovery bool
+	// APIDocPaths are extra addresses to ask for an API description at, on top of the
+	// common ones. Plenty of sites publish a description under a name of their own, and
+	// guessing it is not something a crawler can do.
+	APIDocPaths []string
+	// AllowStateChange lets the crawler queue the endpoints a page calls with POST, PUT,
+	// PATCH or DELETE. They are left out by default: the crawler fetches addresses with
+	// GET, and a request to an endpoint the page's own script only calls to delete
+	// something is not obviously harmless to whatever is behind it.
+	AllowStateChange bool
 	// OnExchange receives every request the crawl made and the response it got,
 	// which is how discovered endpoints reach the scanner.
 	OnExchange func(req *httpmsg.Request, resp *httpmsg.Response)
@@ -285,7 +294,7 @@ func (c *Crawler) Run(ctx context.Context, seed string) error {
 	// outside the page budget, so a small --max-pages does not spend itself on the guesses.
 	seeds := []queueItem{{url: seed}}
 	if !c.opts.NoDiscovery {
-		for _, address := range c.seedAPIDocs(seedURL) {
+		for _, address := range c.seedAPIDocsAt(seedURL, c.opts.APIDocPaths) {
 			seeds = append(seeds, queueItem{url: address, discovery: true})
 		}
 		for _, address := range c.seedSiteFiles(seedURL) {
@@ -500,7 +509,7 @@ func (c *Crawler) fetchOne(ctx context.Context, item queueItem) fetchResult {
 		return result
 	}
 
-	page, err := Parse(string(resp.Body), base)
+	page, err := Parse(string(resp.Body), base, c.opts.AllowStateChange)
 	if err != nil {
 		// A malformed page is not a crawl failure; skip it and carry on.
 		return result
@@ -514,6 +523,21 @@ func (c *Crawler) fetchOne(ctx context.Context, item queueItem) fetchResult {
 	}
 
 	result.links = append(result.links, page.Links...)
+	// A page's script names endpoints that no link points at, and the browser issues none
+	// of them while the page loads. They are worth queueing: this is how a search or delete
+	// handler — the place an injectable parameter usually lives — becomes reachable.
+	//
+	// A read becomes a link. A write cannot: the crawler follows a link with GET, and an
+	// upload endpoint reached with GET has nothing to say. Those are replayed with the
+	// method and body the script uses, so the checks that care about the shape of the
+	// request — the upload check above all — see the endpoint at all.
+	for _, call := range scriptCalls(string(resp.Body), base, c.opts.AllowStateChange) {
+		if safeMethods[call.Method] {
+			result.links = append(result.links, call.URL)
+			continue
+		}
+		c.replayScriptCall(ctx, call)
+	}
 	// A page that carries a Swagger UI names the description it reads, and that name is how a
 	// description kept somewhere other than the common addresses is found.
 	result.links = append(result.links, apiDocReferences(string(resp.Body), base)...)

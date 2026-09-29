@@ -2,6 +2,7 @@ package active
 
 import (
 	"context"
+	"net/url"
 	"regexp"
 	"strings"
 
@@ -60,7 +61,7 @@ func (openRedirect) Run(ctx context.Context, c *checks.Context, t *checks.Target
 	var location string
 	attempt, err := c.SendVariants(ctx, t, payload.Redirect, "open-redirect", redirectSeeds,
 		func(_ *httpmsg.Request, resp *httpmsg.Response, _ payload.Variant) bool {
-			location = redirectTarget(resp)
+			location = redirectTarget(resp, t.Request.Hostname())
 			return location != ""
 		})
 	if err != nil || attempt == nil {
@@ -100,6 +101,36 @@ var redirectSinks = []*regexp.Regexp{
 	regexp.MustCompile(`(?is)refresh\s*[:=]\s*["']?\s*\d`),
 }
 
+// leavesHost reports whether a redirect value sends the browser to another host.
+//
+// A relative reference does not: it resolves against the page that answered. A value that
+// carries an authority does, and leaving the host is the whole of what an open redirect is.
+func leavesHost(value, host string) bool {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return false
+	}
+	target, err := url.Parse(value)
+	if err != nil {
+		return false
+	}
+	// A relative reference, or a scheme with no authority (mailto:, javascript:): the
+	// browser never leaves the site.
+	if target.Host == "" {
+		return false
+	}
+	return !strings.EqualFold(target.Host, host)
+}
+
+// refreshTarget extracts the address from a Refresh header, which is written as
+// `5; url=https://example.com/`.
+func refreshTarget(refresh string) string {
+	if index := strings.Index(strings.ToLower(refresh), "url="); index >= 0 {
+		return strings.TrimSpace(refresh[index+len("url="):])
+	}
+	return ""
+}
+
 // redirectTarget reports where a response sends the visitor, if it canary is
 // redirected to at all.
 //
@@ -114,14 +145,19 @@ var redirectSinks = []*regexp.Regexp{
 // the canary appearing near a word that marks the spot as a destination, which
 // is why the search looks at the text around each occurrence rather than at the
 // response as a whole.
-func redirectTarget(resp *httpmsg.Response) string {
+func redirectTarget(resp *httpmsg.Response, host string) string {
 	if resp == nil {
 		return ""
 	}
-	if location := resp.Header.Get("Location"); strings.Contains(location, redirectCanary) {
+	// A header that merely carries the canary is not an open redirect unless it leaves the
+	// host. `Location: download/?token=https://canary/` keeps the browser on the site — the
+	// canary is data in the query, not the destination — and a 301 to a relative path is
+	// exactly how a download endpoint answers. The body path below already knew this; these
+	// two did not.
+	if location := resp.Header.Get("Location"); strings.Contains(location, redirectCanary) && leavesHost(location, host) {
 		return location
 	}
-	if refresh := resp.Header.Get("Refresh"); strings.Contains(refresh, redirectCanary) {
+	if refresh := resp.Header.Get("Refresh"); strings.Contains(refresh, redirectCanary) && leavesHost(refreshTarget(refresh), host) {
 		return "Refresh: " + refresh
 	}
 	if len(resp.Body) == 0 || !strings.Contains(string(resp.Body), redirectCanary) {

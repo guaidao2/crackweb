@@ -116,6 +116,15 @@ func (methodOverride) Run(ctx context.Context, c *checks.Context, t *checks.Targ
 			if response.Status >= 400 && response.Status == baseline.Status {
 				continue
 			}
+			// A server error is a crash, not a decision about the header. One arriving
+			// while the baseline was a 200 compares an error page against a working one
+			// and concludes that the application acted on the override — which is how a
+			// single transient 5xx becomes that finding. The WAF state machine already
+			// reads a 5xx this way ("a 5xx from the origin is a crash, not a refusal");
+			// this check did not.
+			if response.Status >= 500 {
+				continue
+			}
 
 			// Measured against the control, not just the baseline: the question
 			// is whether this header did something the meaningless one did not.

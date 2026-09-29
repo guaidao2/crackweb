@@ -344,7 +344,9 @@ var chinese = map[Key]string{
 
 	KeyEvidenceCache:   "携带 %s 的请求返回了该值，而去掉它之后同样的请求随即拿到了那份缓存副本",
 	KeyEvidenceVariant: "payload 变形：%s（第 %d 代，变形链：%s）",
-	KeyEvidenceWAF:     "目标位于 %s 之后；payload 已升级到第 %d 代变形",
+	KeyEvidenceCSRF: "把防 CSRF 字段 %s 换成 %s —— 一个服务端不可能签发过的值 —— 请求仍被接受" +
+		"（响应与基线的相似度 %.0f%%）。服务端从不校验的令牌只是摆设。",
+	KeyEvidenceWAF: "目标位于 %s 之后；payload 已升级到第 %d 代变形",
 
 	KeyFlagSession: "一个已认证会话，写成 '名称: 值' 形式的请求头，例如 'Cookie: sess=abc'；" +
 		"至少提供两个不同会话才能启用越权检测。",
@@ -462,6 +464,12 @@ var chinese = map[Key]string{
 	KeyMsgProbing:             "正在向各主机询问 API 描述、robots.txt 与 sitemap",
 	KeyMsgSelfDescribed:       "读到了 %d 份描述与 %d 个站点文件",
 
+	KeyFlagAPIDoc: "除了那些常见的地址，额外在这个路径上请求一次 API 描述。" +
+		"很多站点会用自己的名字发布它 —— 带版本前缀、内部代号 —— 猜是猜不到的。可重复。",
+	KeyFlagAllowStateChange: "把页面脚本只以 POST / PUT / PATCH / DELETE 调用的端点也加入队列。" +
+		"默认会跳过它们：爬虫对自己发现的地址一律用 GET 抓取，而一个脚本自己写着「删除」的地址，" +
+		"对它背后的东西并不是显然无害的 —— 上传表单就属于这一类。" +
+		"页面里用 <form> 声明的表单不受影响：它们走的是另一条提交路径。",
 	KeyFlagNoDiscovery: "不去询问 API 描述、robots.txt 或 sitemap；只测爬取能到达的内容。",
 	KeyFlagNoAssumeWAF: "保留 WAF 探测，只去掉「前面有防护」这个假定：" +
 		"只有在确实探测到拒绝时，才发送额外的代数。默认情况下无论有没有证据都会发，" +

@@ -161,3 +161,40 @@ func TestOpenRedirectSeesTheBypassForms(t *testing.T) {
 		break // the handler answers every payload the same way; one pass is enough
 	}
 }
+
+// TestOpenRedirectIgnoresRelativeLocationHeader: a 301 to a relative path is how a
+// download endpoint answers, and the canary rides along in the query. The browser never
+// leaves the host, so this is not the bug the check reports. The body path already knew
+// that; the header path did not.
+func TestOpenRedirectIgnoresRelativeLocationHeader(t *testing.T) {
+	got := runRedirect(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Location", "/download/?token="+redirectCanary)
+		w.WriteHeader(http.StatusMovedPermanently)
+	})
+	if len(got) != 0 {
+		t.Error("a relative Location was reported as an open redirect")
+	}
+}
+
+// TestLeavesHost draws the line the header paths were missing.
+func TestLeavesHost(t *testing.T) {
+	const host = "example.com"
+	for _, tc := range []struct {
+		value string
+		want  bool
+	}{
+		{"/download/?token=x", false},         // relative: stays put
+		{"download/?token=x", false},          // relative, no leading slash
+		{"//evil.example/x", true},            // protocol-relative: leaves
+		{"https://evil.example/x", true},      // absolute, other host
+		{"http://example.com/x", false},       // absolute, same host
+		{"HTTPS://EXAMPLE.COM/x", false},      // same host, different case
+		{"mailto:someone@example.com", false}, // scheme with no authority
+		{"javascript:alert(1)", false},        // same
+		{"", false},                           // nothing to follow
+	} {
+		if got := leavesHost(tc.value, host); got != tc.want {
+			t.Errorf("leavesHost(%q) = %v, want %v", tc.value, got, tc.want)
+		}
+	}
+}

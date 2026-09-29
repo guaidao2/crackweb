@@ -14,7 +14,7 @@ func parseSingleForm(t *testing.T, document string) Form {
 	if err != nil {
 		t.Fatalf("parse base: %v", err)
 	}
-	page, err := Parse(document, base)
+	page, err := Parse(document, base, false)
 	if err != nil {
 		t.Fatalf("Parse: %v", err)
 	}

@@ -476,6 +476,31 @@ everything is allowed, a bare `/` means nothing is, and a value with `*` or `$` 
 pattern rather than an address. `--no-discovery` turns all of it off, for a target where
 even one address the user did not name is one too many.
 
+The common addresses cover the frameworks that publish a description at a fixed place. A site
+that moved it — a version prefix, an internal name, a path somebody invented — is not
+something a guess finds, so `--api-doc <path>` asks for an extra address by name. It is
+repeatable.
+
+### Endpoints a page's script calls
+
+A single-page application keeps its endpoints in string literals rather than links: a delete
+button's handler, a form that assembles its own request, a search box that fetches when it is
+submitted. Nothing on the page links to them and the browser issues none of them while the
+page loads, so a link-only crawl never sees them.
+
+They are read out of the script with the method and the body the call uses, because a
+discovered address is not the same thing as a tested request. A **read** becomes a link and
+is fetched as usual — with interpolated segments (`/api/documents/${id}`) filled in with a
+number, or the address cannot be requested at all. A **write** is replayed instead: sent with
+the method the script names, and with a body of the same shape — a `FormData` becomes
+multipart with a file part for the field that asks for one, a `JSON.stringify` becomes JSON
+with the same field names. That is what lets the upload check see an upload endpoint whose
+form exists only in script.
+
+Writes are skipped unless `--allow-state-change` is given, and that flag now means what it
+says: it will send the `DELETE` a page's script contains. Point it at a target where that is
+acceptable.
+
 ## Project layout
 
 ```

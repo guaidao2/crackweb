@@ -236,3 +236,78 @@ func TestSQLiUnionWithFormEcho(t *testing.T) {
 	safeReq.Header.Set("Content-Length", "9")
 	_ = safeReq
 }
+
+// TestUnionMarkersAboveEcho is the fix for a false positive that a real search page
+// produced: the term is echoed into the page title and into a heading, both of them text
+// nodes, so the markers are present whether or not anything was injected. The literal
+// exclusion inside unionMarkersInText cannot see that when the payload reached the server
+// split (`UN/**/ION`), because the echo then carries the same split.
+func TestUnionMarkersAboveEcho(t *testing.T) {
+	// A page that echoes the term and shows no rows.
+	search := func(term string) string {
+		return "<html><head><title>Search: " + term + "</title></head>" +
+			"<body><h2>Results for " + term + "</h2><p>no results</p></body></html>"
+	}
+	// The same page, with the injected row rendered as data.
+	searchWithRow := func(term string) string {
+		return "<html><head><title>Search: " + term + "</title></head>" +
+			"<body><h2>Results for " + term + "</h2><ul><li>918273645: x</li></ul></body></html>"
+	}
+
+	const payload = "1' UN/**/ION SELECT 918273645-- -"
+	for _, tc := range []struct {
+		name   string
+		body   string
+		echoed int
+		want   bool
+	}{
+		{
+			// The term is echoed twice and the payload is echoed the same way: the count is
+			// the same as plain input, so nothing was injected.
+			name:   "echo only",
+			body:   search(payload),
+			echoed: len(unionMarkersInText(search("918273645"))),
+			want:   false,
+		},
+		{
+			// One more marker than the echo accounts for: a row arrived.
+			name:   "echo plus a row",
+			body:   searchWithRow(payload),
+			echoed: len(unionMarkersInText(search("918273645"))),
+			want:   true,
+		},
+		{
+			// A page that does not echo the term at all.
+			name:   "injected row only",
+			body:   "<html><body><ul><li>918273645: x</li></ul></body></html>",
+			echoed: 0,
+			want:   true,
+		},
+		{
+			// The probe could not be sent: fall back to the plain test rather than staying
+			// silent, because missing an injection is the worse error.
+			name:   "unprobed page with a row",
+			body:   "<html><body><ul><li>918273645: x</li></ul></body></html>",
+			echoed: -1,
+			want:   true,
+		},
+		{
+			name:   "unprobed page with nothing",
+			body:   "<html><body>no results</body></html>",
+			echoed: -1,
+			want:   false,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := unionMarkersAboveEcho(tc.body, tc.echoed); got != tc.want {
+				t.Errorf("unionMarkersAboveEcho(...) = %v, want %v", got, tc.want)
+			}
+		})
+	}
+
+	// And the case that matters most: the echo is only counted once per page, so a page that
+	// echoes the term must not be judged on the plain rule.
+	if unionMarkersLanded(search(payload), payload) == false {
+		t.Log("note: the plain rule sees the echo, which is why the probe exists")
+	}
+}

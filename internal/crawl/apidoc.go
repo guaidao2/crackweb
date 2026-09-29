@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/url"
 	"regexp"
+	"strings"
 
 	"github.com/guaidao2/crackweb/internal/apidoc"
 	"github.com/guaidao2/crackweb/internal/httpmsg"
@@ -44,7 +45,22 @@ var apiDocRefRe = regexp.MustCompile(
 
 // seedAPIDocs returns the common description addresses for a seed, in scope.
 func (c *Crawler) seedAPIDocs(seed *url.URL) []string {
-	return c.seedWellKnown(seed, apiDocPaths)
+	return c.seedAPIDocsAt(seed, nil)
+}
+
+// seedAPIDocsAt adds the paths the caller named to the common ones.
+//
+// The common names cover the frameworks that publish a description at a fixed address. A
+// site that moved it — an internal name, a version prefix, an obfuscated path — is not
+// something a guess will find, so the caller can say where it is.
+func (c *Crawler) seedAPIDocsAt(seed *url.URL, extra []string) []string {
+	paths := apiDocPaths
+	for _, path := range extra {
+		if path = strings.TrimSpace(path); path != "" {
+			paths = append(append([]string(nil), paths...), path)
+		}
+	}
+	return c.seedWellKnown(seed, paths)
 }
 
 // apiDocReferences returns the description addresses a document points at.

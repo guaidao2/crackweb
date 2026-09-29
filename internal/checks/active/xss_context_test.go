@@ -60,6 +60,20 @@ func TestExecutableContext(t *testing.T) {
 			want: false,
 		},
 		{
+			// The same string, echoed back into an ordinary form field. A browser never
+			// follows `value` as a URL, so this is inert however it looks.
+			name: "javascript url in a form value",
+			body: `<html><body><input type="hidden" name="category" value="javascript:alert(1)"></body></html>`,
+			want: false,
+		},
+		{
+			// And the event-handler spelling, which also needs to leave the attribute to
+			// do anything: inside the value it is just text.
+			name: "event handler inside a form value",
+			body: `<html><body><input type="text" name="q" value=" autofocus onfocus=alert(1)"></body></html>`,
+			want: false,
+		},
+		{
 			name: "javascript url in an href",
 			body: `<html><body><a href="javascript:alert(1)">click</a></body></html>`,
 			want: true,
@@ -70,8 +84,11 @@ func TestExecutableContext(t *testing.T) {
 			switch tc.name {
 			case "closing the attribute first":
 				marker = `"><script>alert(1)</script>`
-			case "javascript url in body text", "javascript url in an href":
+			case "javascript url in body text", "javascript url in an href",
+				"javascript url in a form value":
 				marker = "javascript:alert(1)"
+			case "event handler inside a form value":
+				marker = " autofocus onfocus=alert(1)"
 			}
 			if got := executableContext(tc.body, marker); got != tc.want {
 				t.Errorf("executableContext(%s) = %v, want %v", tc.name, got, tc.want)
@@ -81,17 +98,53 @@ func TestExecutableContext(t *testing.T) {
 }
 
 // TestDescribeContextNamesThePlace: the evidence has to say where the payload
-// landed, or a reader cannot judge the finding.
+// landed, or a reader cannot judge the finding. Each case carries its own marker,
+// because what matters is where that exact string sits.
 func TestDescribeContextNamesThePlace(t *testing.T) {
 	const payload = "<script>alert(1)</script>"
-	cases := map[string]string{
-		"<html><body>" + payload + "</body></html>":                             "in the document body",
-		"<html><body><script>var a = '" + payload + "';</script></body></html>": "inside a script block",
-		`<html><body><input value="` + payload + `"></body></html>`:             "in an attribute, closing it first",
-	}
-	for body, want := range cases {
-		if got := describeContext(body, payload); got != want {
-			t.Errorf("describeContext = %q, want %q", got, want)
-		}
+	const escaping = `"><img src=x onerror=alert(1)>`
+	for _, tc := range []struct {
+		name   string
+		body   string
+		marker string
+		want   string
+	}{
+		{
+			name:   "document body",
+			body:   "<html><body>" + payload + "</body></html>",
+			marker: payload,
+			want:   "in the document body",
+		},
+		{
+			name:   "script block",
+			body:   "<html><body><script>var a = '" + payload + "';</script></body></html>",
+			marker: payload,
+			want:   "inside a script block",
+		},
+		{
+			// Starts with `<`, so it does not close the attribute — it sits inside the value.
+			name:   "inside an attribute value",
+			body:   `<html><body><input value="` + payload + `"></body></html>`,
+			marker: payload,
+			want:   "inside an attribute value",
+		},
+		{
+			name:   "after closing the attribute",
+			body:   `<html><body><input value="` + escaping + `"></body></html>`,
+			marker: escaping,
+			want:   "in an attribute, after closing it",
+		},
+		{
+			name:   "URL-bearing attribute",
+			body:   `<html><body><a href="javascript:alert(1)">x</a></body></html>`,
+			marker: "javascript:alert(1)",
+			want:   "in a URL-bearing attribute",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := describeContext(tc.body, tc.marker); got != tc.want {
+				t.Errorf("describeContext = %q, want %q", got, tc.want)
+			}
+		})
 	}
 }

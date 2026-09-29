@@ -215,3 +215,28 @@ func TestMethodOverrideSkipsHeadersThatChangeEverything(t *testing.T) {
 		t.Errorf("a page that reacts to any header was reported: %+v", findings[0].Evidence.Matches)
 	}
 }
+
+// TestMethodOverrideIgnoresAServerError: a 5xx while the baseline was a 200 is a crash, not
+// the application acting on the header. Comparing the error page against the control page
+// says only that one request failed — and a single transient 5xx was enough to produce this
+// finding on a target that ignores the header entirely.
+func TestMethodOverrideIgnoresAServerError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		for _, header := range methodOverrideHeaders {
+			if r.Header.Get(header) != "" {
+				// A crash, not a refusal: a different status code from the baseline, so the
+				// "same status as the baseline" guard does not catch it.
+				w.WriteHeader(http.StatusInternalServerError)
+				fmt.Fprint(w, "<html><body>Internal Server Error</body></html>")
+				return
+			}
+		}
+		fmt.Fprintf(w, "<html><body>Read only. %s</body></html>", strings.Repeat("page ", 40))
+	}))
+	defer server.Close()
+
+	h := newHarness(t)
+	if findings := h.run(t, methodOverride{}, server.URL+"/items"); len(findings) != 0 {
+		t.Errorf("a server error was reported as an honoured override: %v", findings[0].Evidence.Matches)
+	}
+}

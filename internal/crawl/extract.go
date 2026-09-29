@@ -153,16 +153,21 @@ func randomBoundary() string {
 	return hex.EncodeToString(raw[:])
 }
 
-// jsURLRe finds URL-ish string literals inside inline script, which is where
-// single-page applications keep the endpoints a link-only crawl never sees.
-var jsURLRe = regexp.MustCompile("[\"'`](https?://[^\"'`\\s<>]+|/[A-Za-z0-9_\\-./?=&%:{}]+)[\"'`]")
+// jsURLRe finds absolute addresses written in inline script, which is where single-page
+// applications keep the calls a link-only crawl never sees.
+//
+// Same-origin paths are deliberately left to scriptTargets. That one substitutes the
+// interpolated segments a template literal carries, and — more to the point — splitting the
+// read/write decision across two extractors is how one of them ends up queueing a path the
+// other meant to skip.
+var jsURLRe = regexp.MustCompile("[\"'`](https?://[^\"'`\\s<>]+)[\"'`]")
 
 // Parse extracts links and forms from an HTML document.
 //
 // It is deliberately a scanner rather than a browser: it follows anchors,
 // frames, form actions and the URL literals in scripts. That covers the
 // server-rendered web well and the browser engine covers the rest.
-func Parse(document string, base *url.URL) (*Page, error) {
+func Parse(document string, base *url.URL, allowStateChange bool) (*Page, error) {
 	root, err := html.Parse(strings.NewReader(document))
 	if err != nil {
 		return nil, err
@@ -216,8 +221,18 @@ func Parse(document string, base *url.URL) (*Page, error) {
 					break
 				}
 				if node.FirstChild != nil && node.FirstChild.Type == html.TextNode {
-					for _, match := range jsURLRe.FindAllStringSubmatch(node.FirstChild.Data, 40) {
-						addLink(match[1])
+					script := node.FirstChild.Data
+					// Absolute addresses the page names.
+					for _, match := range jsURLRe.FindAllStringSubmatchIndex(script, 40*4) {
+						if !allowStateChange && !safeMethodNear(script, match) {
+							continue
+						}
+						addLink(script[match[2]:match[3]])
+					}
+					// And same-origin paths, which scriptTargets resolves and whose
+					// interpolated segments it substitutes.
+					for _, address := range scriptTargets(script, base, allowStateChange) {
+						addLink(address)
 					}
 				}
 			}

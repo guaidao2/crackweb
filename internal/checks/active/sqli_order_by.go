@@ -57,6 +57,26 @@ var orderByFamilies = []struct {
 // than a rare case: any list view with a sortable column has one, and the usual
 // remedy — binding the value — does not apply to a column name, so the flaw
 // survives frameworks that parameterise everything else.
+// sessionCookieNames are cookie names whose value identifies a session rather than carrying
+// data the application parses. Changing one changes who the request is served as, not what
+// it asks for.
+var sessionCookieNames = []string{
+	"phpsessid", "jsessionid", "asp.net_sessionid", "aspsessionid", "sessionid",
+	"session", "sessid", "sid", "connect.sid", "laravel_session", "ci_session",
+	"_session_id", "rack.session", "csrf", "xsrf",
+}
+
+// isSessionCookie reports whether a cookie name identifies a session.
+func isSessionCookie(name string) bool {
+	lower := strings.ToLower(name)
+	for _, known := range sessionCookieNames {
+		if strings.Contains(lower, known) {
+			return true
+		}
+	}
+	return false
+}
+
 type sqliOrderBy struct{}
 
 func (sqliOrderBy) ID() string                 { return "sqli-order-by" }
@@ -71,6 +91,14 @@ func (sqliOrderBy) Passive() bool { return false }
 
 func (sqliOrderBy) Run(ctx context.Context, c *checks.Context, t *checks.Target) []*finding.Finding {
 	if t == nil || t.Param == nil || t.Response == nil {
+		return nil
+	}
+	// A session cookie selects which session the request is served as, so changing its
+	// value changes the page for a reason that has nothing to do with any query. The
+	// judgement below compares responses, and would read "served as a different session" as
+	// "the clause reacted to the term". What this check looks for is a sort column, and a
+	// session identifier is not one.
+	if t.Param.In == httpmsg.LocCookie && isSessionCookie(t.Param.Name) {
 		return nil
 	}
 

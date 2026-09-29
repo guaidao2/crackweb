@@ -2,6 +2,7 @@ package passive
 
 import (
 	"context"
+	"net"
 	"regexp"
 	"strings"
 
@@ -106,7 +107,13 @@ var (
 		`|192\.168\.\d{1,3}\.\d{1,3})\b`)
 	unixPathRe    = regexp.MustCompile(`(?:/(?:home|Users)/[A-Za-z0-9._-]{3,}|/(?:var|srv|opt)/www/)`)
 	windowsPathRe = regexp.MustCompile(`\b[A-Za-z]:\\(?:[A-Za-z0-9._-]+\\?){2,}`)
-	mailboxRe     = regexp.MustCompile(`\b[A-Za-z0-9._%+-]+@([A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+)\b`)
+	// The domain may be a single label: `ops@gateway` names a host on the local network, and
+	// an address that uses one is deployment detail in a way a public domain never is.
+	//
+	// It has to start with a letter, though. A domain is a hostname, and `@400px` in a
+	// stylesheet is not one — without this, every rule that writes `@` followed by a number
+	// reads as a mailbox on a private host.
+	mailboxRe = regexp.MustCompile(`\b[A-Za-z0-9._%+-]+@([A-Za-z][A-Za-z0-9-]*(?:\.[A-Za-z0-9-]+)*)\b`)
 )
 
 // contentDisclosure reports detail a response reveals about the machine behind it: an
@@ -130,6 +137,47 @@ func (contentDisclosure) Tags() []string {
 }
 func (contentDisclosure) Passive() bool { return true }
 
+// internalDomainSuffixes name a private network rather than a public one.
+var internalDomainSuffixes = []string{
+	".local", ".internal", ".lan", ".corp", ".intranet", ".localdomain", ".home", ".private",
+}
+
+// isInternalDomain reports whether a domain names something on a private network.
+//
+// A public domain — 126.com, gmail.com, the site's own — says nothing about the deployment
+// behind the site, and an address that uses one is contact information.
+// isAllDigits reports whether a string is nothing but digits.
+func isAllDigits(value string) bool {
+	if value == "" {
+		return false
+	}
+	for _, r := range value {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+func isInternalDomain(domain string) bool {
+	lower := strings.ToLower(domain)
+	for _, suffix := range internalDomainSuffixes {
+		if strings.HasSuffix(lower, suffix) {
+			return true
+		}
+	}
+	// A domain that is an address is not a public name.
+	if net.ParseIP(lower) != nil {
+		return true
+	}
+	// One label with no dot is a hostname on the local network — but a bare number is not a
+	// hostname. The regular expression above already refuses those; this is the second belt.
+	if !strings.Contains(lower, ".") {
+		return !isAllDigits(lower)
+	}
+	return false
+}
+
 func (contentDisclosure) Run(_ context.Context, _ *checks.Context, t *checks.Target) []*finding.Finding {
 	if t.Response == nil || len(t.Response.Body) == 0 {
 		return nil
@@ -147,7 +195,11 @@ func (contentDisclosure) Run(_ context.Context, _ *checks.Context, t *checks.Tar
 	}
 	// Only the domain of a mailbox is kept. A published address is somebody's personal
 	// data, and the report has no need for it to make its point.
-	if match := mailboxRe.FindStringSubmatch(body); match != nil {
+	//
+	// And only when that domain is plainly internal. Almost every site publishes a contact
+	// address, and reporting each one makes the check's real finding — an address, a path —
+	// disappear into a list the reader learns to skip.
+	if match := mailboxRe.FindStringSubmatch(body); match != nil && isInternalDomain(match[1]) {
 		kinds = append(kinds, "mailbox at "+match[1])
 	}
 	if len(kinds) == 0 {

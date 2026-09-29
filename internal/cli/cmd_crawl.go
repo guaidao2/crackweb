@@ -25,6 +25,8 @@ type crawlOptions struct {
 	report      *string
 	listChecks  *bool
 	noDiscovery *bool
+	allowState  *bool
+	apiDoc      *[]string
 	oobHTTP     *string
 	oobDNS      *string
 	oobDomain   *string
@@ -46,6 +48,8 @@ func newCrawlCommand() *command {
 				report:         fs.String("output", "o", "", "<file>", i18n.KeyFlagScanOutput),
 				listChecks:     fs.Bool("list-checks", "", i18n.KeyFlagListChecks),
 				noDiscovery:    fs.Bool("no-discovery", "", i18n.KeyFlagNoDiscovery),
+				allowState:     fs.Bool("allow-state-change", "", i18n.KeyFlagAllowStateChange),
+				apiDoc:         fs.StringSlice("api-doc", "", "<path>", i18n.KeyFlagAPIDoc),
 				oobHTTP:        fs.String("oob-http", "", "", "<addr>", i18n.KeyFlagHTTPAddr),
 				oobDNS:         fs.String("oob-dns", "", "", "<addr>", i18n.KeyFlagDNSAddr),
 				oobDomain:      fs.String("oob-domain", "", "", "<host>", i18n.KeyFlagOOBDomain),
@@ -125,13 +129,15 @@ func runCrawl(app *App, opts *crawlOptions, _ []string) error {
 	checkCtx.Exchanges = trafficView(store)
 
 	crawler := crawl.New(crawl.Options{
-		Client:      client,
-		Engine:      *opts.engine,
-		Depth:       *opts.depth,
-		MaxPages:    *opts.maxPages,
-		Concurrency: *opts.threads,
-		Scope:       *opts.scope,
-		NoDiscovery: *opts.noDiscovery,
+		Client:           client,
+		Engine:           *opts.engine,
+		Depth:            *opts.depth,
+		MaxPages:         *opts.maxPages,
+		Concurrency:      *opts.threads,
+		Scope:            *opts.scope,
+		NoDiscovery:      *opts.noDiscovery,
+		AllowStateChange: *opts.allowState,
+		APIDocPaths:      *opts.apiDoc,
 		OnExchange: func(req *httpmsg.Request, resp *httpmsg.Response) {
 			store.Add(req, resp)
 			scanner.Submit(req, resp)

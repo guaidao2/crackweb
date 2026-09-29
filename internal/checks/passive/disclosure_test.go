@@ -66,7 +66,7 @@ func TestContentDisclosureFindsDeploymentDetail(t *testing.T) {
 	cases := map[string]string{
 		"internal address": "the worker at 10.20.30.40 did not answer",
 		"server-side path": "failed to read /home/deploy/app/config.yml",
-		"mailbox":          "contact the team at platform-operators@example.com",
+		"mailbox":          "contact the team at platform-operators@deploy.internal",
 	}
 	for name, body := range cases {
 		tg := responseTarget(t, "http://example.com/", "text/html", "<html><body>"+body+"</body></html>")
@@ -85,7 +85,7 @@ func TestContentDisclosureFindsDeploymentDetail(t *testing.T) {
 // The address belongs to a person; the domain is what makes the finding actionable.
 func TestContentDisclosureKeepsMailboxesToTheirDomain(t *testing.T) {
 	tg := responseTarget(t, "http://example.com/", "text/html",
-		"<html><body>write to alice.smith@example.com</body></html>")
+		"<html><body>write to alice.smith@deploy.internal</body></html>")
 	findings := runPassive(t, contentDisclosure{}, tg)
 	if len(findings) != 1 {
 		t.Fatalf("got %d findings, want 1", len(findings))
@@ -94,8 +94,41 @@ func TestContentDisclosureKeepsMailboxesToTheirDomain(t *testing.T) {
 	if strings.Contains(evidence, "alice.smith@") {
 		t.Errorf("the full address reached the report: %s", evidence)
 	}
-	if !strings.Contains(evidence, "example.com") {
+	if !strings.Contains(evidence, "deploy.internal") {
 		t.Errorf("the domain is missing from the report: %s", evidence)
+	}
+}
+
+// TestContentDisclosureLeavesPublicMailboxesAlone: nearly every site publishes a contact
+// address. Reporting those buries the finding that matters — an address, a path — in a list
+// the reader skips.
+func TestContentDisclosureLeavesPublicMailboxesAlone(t *testing.T) {
+	for _, address := range []string{
+		"alice.smith@example.com",
+		"hello@126.com",
+		"support@gmail.com",
+	} {
+		tg := responseTarget(t, "http://example.com/", "text/html",
+			"<html><body>write to "+address+"</body></html>")
+		if findings := runPassive(t, contentDisclosure{}, tg); len(findings) != 0 {
+			t.Errorf("%s was reported as deployment detail", address)
+		}
+	}
+}
+
+// TestContentDisclosureStillCatchesPrivateHostsInAddresses: a domain that is itself a
+// private name is deployment detail, whichever side of the @ it is on.
+func TestContentDisclosureStillCatchesPrivateHostsInAddresses(t *testing.T) {
+	for _, address := range []string{
+		"ops@10.20.30.40",
+		"ops@gateway",
+		"ops@fileserver.lan",
+	} {
+		tg := responseTarget(t, "http://example.com/", "text/html",
+			"<html><body>write to "+address+"</body></html>")
+		if findings := runPassive(t, contentDisclosure{}, tg); len(findings) == 0 {
+			t.Errorf("%s was not reported", address)
+		}
 	}
 }
 
@@ -198,6 +231,22 @@ func TestContentDisclosureIgnoresRuntimePathsFromThirdPartyAssets(t *testing.T) 
 		tg := responseTarget(t, "http://example.com/static/lib.min.js", "application/javascript", body)
 		if findings := runPassive(t, contentDisclosure{}, tg); len(findings) != 0 {
 			t.Errorf("%q was reported as a deployment path: %v", body, findings[0].Evidence.Matches)
+		}
+	}
+}
+
+// TestContentDisclosureIgnoresAtSignsThatAreNotAddresses: `@400px` and friends are not
+// mailboxes. A bare number is not a hostname either, so treating an unqualified domain as
+// "internal" reported every rule that writes an at-sign before a number.
+func TestContentDisclosureIgnoresAtSignsThatAreNotAddresses(t *testing.T) {
+	for _, body := range []string{
+		"<style>@media (min-width:400px) { }</style>",
+		"<p>send to ops@400</p>",
+		"<p>font-size@2x</p>",
+	} {
+		tg := responseTarget(t, "http://example.com/", "text/html", "<html><body>"+body+"</body></html>")
+		if findings := runPassive(t, contentDisclosure{}, tg); len(findings) != 0 {
+			t.Errorf("a non-address at-sign was reported in %q: %v", body, findings[0].Evidence.Matches)
 		}
 	}
 }

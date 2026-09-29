@@ -95,6 +95,19 @@ func unionMarkersLanded(body, sent string) bool {
 	return len(unionMarkersInText(body)) > 0
 }
 
+// unionMarkersAboveEcho reports whether the page rendered more markers than it renders for
+// the same number sent as plain input.
+//
+// A negative echo count means the probe could not be sent, and the check falls back to the
+// plain test: it is worse to miss an injection than to report one this page already shows.
+func unionMarkersAboveEcho(body string, echoed int) bool {
+	landed := len(unionMarkersInText(body))
+	if echoed < 0 {
+		return landed > 0
+	}
+	return landed > echoed
+}
+
 // sqliUnion detects SQL injection by extending the query's result set.
 //
 // It exists because the other three SQL checks each need something a hardened
@@ -131,9 +144,24 @@ func (sqliUnion) Run(ctx context.Context, c *checks.Context, t *checks.Target) [
 
 	c.ProbeWAF(ctx, t)
 
+	// A page that echoes the term back renders the marker whether or not anything was
+	// injected — this one puts it in the page title and again in a heading, both of them text
+	// nodes. The literal test inside unionMarkersInText catches the echo when the statement
+	// comes back with the marker, but a payload written to get past a filter does not carry
+	// that literal: `UN/**/ION` is still a UNION to the database and not one to a substring
+	// search, which is exactly why the mutation engine produced it.
+	//
+	// So measure the echo instead of guessing at it. Asking for the marker as ordinary input
+	// shows what this page does with any value it is handed; only a count above that is the
+	// query answering with rows of its own.
+	echoed := -1
+	if _, response, err := c.InjectEncoded(ctx, t, strconv.Itoa(unionMarkerBase), checks.EncodeURL); err == nil && response != nil {
+		echoed = len(unionMarkersInText(string(response.Body)))
+	}
+
 	attempt, err := c.SendVariants(ctx, t, payload.SQLi, "sqli-union", unionSeeds(),
 		func(_ *httpmsg.Request, resp *httpmsg.Response, variant payload.Variant) bool {
-			return unionMarkersLanded(string(resp.Body), variant.Value)
+			return unionMarkersAboveEcho(string(resp.Body), echoed)
 		})
 	if err != nil || attempt == nil {
 		return nil

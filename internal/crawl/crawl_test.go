@@ -37,7 +37,7 @@ func TestParseExtractsLinks(t *testing.T) {
 		<meta http-equiv="refresh" content="0; url=/refreshed">
 	</body></html>`
 
-	page, err := Parse(document, base(t, "https://example.com/page/"))
+	page, err := Parse(document, base(t, "https://example.com/page/"), false)
 	if err != nil {
 		t.Fatalf("Parse: %v", err)
 	}
@@ -70,16 +70,45 @@ func TestParseExtractsScriptURLs(t *testing.T) {
 		xhr.open("POST", "/api/login");
 	</script></html>`
 
-	page, err := Parse(document, base(t, "https://example.com/"))
+	page, err := Parse(document, base(t, "https://example.com/"), false)
 	if err != nil {
 		t.Fatalf("Parse: %v", err)
 	}
 
 	joined := strings.Join(page.Links, " ")
-	for _, want := range []string{"/api/v1/users?active=1", "https://example.com/api/orders", "/api/login"} {
+	for _, want := range []string{"/api/v1/users?active=1", "https://example.com/api/orders"} {
 		if !strings.Contains(joined, want) {
 			t.Errorf("script URL %q not extracted; got %v", want, page.Links)
 		}
+	}
+	// The xhr call names POST, so it is a write. A write is not a link — the crawler
+	// replays it with its own method — so it does not appear here whatever the flag says.
+	if strings.Contains(joined, "/api/login") {
+		t.Errorf("a write was queued as a link: %v", page.Links)
+	}
+
+	page, err = Parse(document, base(t, "https://example.com/"), true)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if strings.Contains(strings.Join(page.Links, " "), "/api/login") {
+		t.Errorf("a write was queued as a link with the flag on: %v", page.Links)
+	}
+
+	// The write is still discovered — as a call to replay, not as a link to follow.
+	privileged, _ := url.Parse("https://example.com/")
+	walks := scriptCalls(document, privileged, true)
+	found := false
+	for _, call := range walks {
+		if strings.Contains(call.URL, "/api/login") {
+			found = true
+			if call.Method != "POST" {
+				t.Errorf("/api/login came back as %s, want POST", call.Method)
+			}
+		}
+	}
+	if !found {
+		t.Errorf("the POST call was not discovered at all: %v", walks)
 	}
 }
 
@@ -99,7 +128,7 @@ func TestParseExtractsForms(t *testing.T) {
 		<form><input name="q"></form>
 	</body></html>`
 
-	page, err := Parse(document, base(t, "https://example.com/"))
+	page, err := Parse(document, base(t, "https://example.com/"), false)
 	if err != nil {
 		t.Fatalf("Parse: %v", err)
 	}
@@ -137,7 +166,7 @@ func TestParseExtractsForms(t *testing.T) {
 
 func TestParseHandlesMalformedHTML(t *testing.T) {
 	// The parser must not choke on the tag soup that real applications emit.
-	page, err := Parse(`<div><a href="/a">unclosed<a href="/b">`, base(t, "https://example.com/"))
+	page, err := Parse(`<div><a href="/a">unclosed<a href="/b">`, base(t, "https://example.com/"), false)
 	if err != nil {
 		t.Fatalf("Parse: %v", err)
 	}

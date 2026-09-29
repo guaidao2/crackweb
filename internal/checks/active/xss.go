@@ -79,6 +79,15 @@ func (xssReflected) Tags() []string {
 }
 func (xssReflected) Passive() bool { return false }
 
+// urlBearingAttributes are the attributes a browser follows as a URL. A `javascript:` value
+// runs in these and nowhere else: the same string in `value`, `class` or `alt` is inert text
+// that the browser never evaluates. Without this distinction every reflection into an
+// ordinary form field reads as script execution.
+var urlBearingAttributes = []string{
+	"href", "src", "action", "formaction", "data", "poster", "background",
+	"codebase", "cite", "longdesc", "usemap", "xlink:href", "srcdoc",
+}
+
 // inertElements are elements whose content the HTML parser treats as text, so a
 // tag inside one never runs.
 var inertElements = []string{"textarea", "title", "xmp", "noscript", "noframes"}
@@ -118,9 +127,11 @@ func executableContext(body, marker string) bool {
 	// A payload carrying no markup characters cannot create an element. The
 	// `javascript:` forms are like this: they do nothing in a text node and only
 	// run when they land in a URL-bearing attribute, so their being present in
-	// the body is not evidence of anything.
+	// the body is not evidence of anything — and neither is their presence in an
+	// ordinary attribute, which is where a search term echoed into a form field
+	// ends up.
 	if !strings.ContainsAny(marker, "<>") {
-		return inTag
+		return inTag && inURLBearingAttribute(before)
 	}
 
 	// Inside a tag, the parser is reading an attribute value, so the payload
@@ -149,9 +160,53 @@ func describeContext(body, marker string) string {
 		return "inside a script block"
 	}
 	if lastOpen, lastClose := strings.LastIndex(before, "<"), strings.LastIndex(before, ">"); lastOpen > lastClose {
-		return "in an attribute, closing it first"
+		// Which of the two it is decides whether the payload can do anything, so the
+		// evidence says which. A value inside an attribute is inert until something
+		// closes that attribute first.
+		if strings.HasPrefix(marker, "\"") || strings.HasPrefix(marker, "'") ||
+			strings.HasPrefix(marker, ">") || strings.HasPrefix(marker, "/>") {
+			return "in an attribute, after closing it"
+		}
+		if inURLBearingAttribute(before) {
+			return "in a URL-bearing attribute"
+		}
+		return "inside an attribute value"
 	}
 	return "in the document body"
+}
+
+// inURLBearingAttribute reports whether the attribute whose value the payload landed in is
+// one a browser follows as a URL.
+func inURLBearingAttribute(before string) bool {
+	open := strings.LastIndex(before, "<")
+	if open < 0 {
+		return false
+	}
+	tag := before[open+1:]
+	space := strings.IndexAny(tag, " \t\n\r")
+	if space < 0 {
+		return false
+	}
+	// The attribute being read is the one whose `=` precedes the payload.
+	equals := strings.LastIndex(tag, "=")
+	if equals < 0 {
+		return false
+	}
+	head := strings.TrimRight(tag[:equals], " \t\n\r")
+	end := len(head)
+	for end > 0 {
+		if c := head[end-1]; c == ' ' || c == '\t' || c == '\n' || c == '\r' {
+			break
+		}
+		end--
+	}
+	name := head[end:]
+	for _, attribute := range urlBearingAttributes {
+		if name == attribute {
+			return true
+		}
+	}
+	return false
 }
 
 func (xssReflected) Run(ctx context.Context, c *checks.Context, t *checks.Target) []*finding.Finding {
