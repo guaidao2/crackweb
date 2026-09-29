@@ -154,6 +154,36 @@ const (
 	KeyCheckDirListingDesc  Key = "check.passive-directory-listing.description"
 	KeyCheckDirListingFix   Key = "check.passive-directory-listing.remediation"
 
+	// Passive check: third-party assets loaded without subresource integrity.
+	KeyCheckSRITitle Key = "check.passive-sri.title"
+	KeyCheckSRIDesc  Key = "check.passive-sri.description"
+	KeyCheckSRIFix   Key = "check.passive-sri.remediation"
+
+	// Passive check: error messages and stack traces in a response body.
+	KeyCheckErrorDisclosureTitle Key = "check.passive-error-disclosure.title"
+	KeyCheckErrorDisclosureDesc  Key = "check.passive-error-disclosure.description"
+	KeyCheckErrorDisclosureFix   Key = "check.passive-error-disclosure.remediation"
+
+	// Passive check: internal addresses, file paths and mailboxes in a response body.
+	KeyCheckContentDisclosureTitle Key = "check.passive-content-disclosure.title"
+	KeyCheckContentDisclosureDesc  Key = "check.passive-content-disclosure.description"
+	KeyCheckContentDisclosureFix   Key = "check.passive-content-disclosure.remediation"
+
+	// Passive check: a private key served in a response body.
+	KeyCheckPrivateKeyTitle Key = "check.passive-private-key.title"
+	KeyCheckPrivateKeyDesc  Key = "check.passive-private-key.description"
+	KeyCheckPrivateKeyFix   Key = "check.passive-private-key.remediation"
+
+	// Passive check: a password field served over plain HTTP.
+	KeyCheckInsecureTransportTitle Key = "check.passive-insecure-transport.title"
+	KeyCheckInsecureTransportDesc  Key = "check.passive-insecure-transport.description"
+	KeyCheckInsecureTransportFix   Key = "check.passive-insecure-transport.remediation"
+
+	// Passive check: a front-end library at a version with a published vulnerability.
+	KeyCheckLibraryTitle Key = "check.passive-vulnerable-library.title"
+	KeyCheckLibraryDesc  Key = "check.passive-vulnerable-library.description"
+	KeyCheckLibraryFix   Key = "check.passive-vulnerable-library.remediation"
+
 	// Active check: error-based SQL injection.
 	KeyCheckSQLiErrorTitle Key = "check.sqli-error.title"
 	KeyCheckSQLiErrorDesc  Key = "check.sqli-error.description"
@@ -209,6 +239,51 @@ const (
 	KeyCheckIDORDesc  Key = "check.idor.description"
 	KeyCheckIDORFix   Key = "check.idor.remediation"
 
+	// Active check: a refusal that does not survive a change of method or path spelling.
+	KeyCheckAccessVariantsTitle Key = "check.access-control-variants.title"
+	KeyCheckAccessVariantsDesc  Key = "check.access-control-variants.description"
+	KeyCheckAccessVariantsFix   Key = "check.access-control-variants.remediation"
+
+	// Active check: a page-size parameter that does not bound the response.
+	KeyCheckPaginationTitle Key = "check.pagination-bypass.title"
+	KeyCheckPaginationDesc  Key = "check.pagination-bypass.description"
+	KeyCheckPaginationFix   Key = "check.pagination-bypass.remediation"
+
+	// Active check: a value refused as a scalar and accepted once it is wrapped.
+	KeyCheckTypeBypassTitle Key = "check.parameter-type-bypass.title"
+	KeyCheckTypeBypassDesc  Key = "check.parameter-type-bypass.description"
+	KeyCheckTypeBypassFix   Key = "check.parameter-type-bypass.remediation"
+
+	// Active check: a value the page's own script turns into running markup.
+	KeyCheckDOMXSSTitle Key = "check.dom-xss.title"
+	KeyCheckDOMXSSDesc  Key = "check.dom-xss.description"
+	KeyCheckDOMXSSFix   Key = "check.dom-xss.remediation"
+
+	// Active check: a value reaching an LDAP filter.
+	KeyCheckLDAPTitle Key = "check.ldap-injection.title"
+	KeyCheckLDAPDesc  Key = "check.ldap-injection.description"
+	KeyCheckLDAPFix   Key = "check.ldap-injection.remediation"
+
+	// Active check: a value reaching an XPath expression.
+	KeyCheckXPathTitle Key = "check.xpath-injection.title"
+	KeyCheckXPathDesc  Key = "check.xpath-injection.description"
+	KeyCheckXPathFix   Key = "check.xpath-injection.remediation"
+
+	// Active check: a value reaching an OData query.
+	KeyCheckODataTitle Key = "check.odata-injection.title"
+	KeyCheckODataDesc  Key = "check.odata-injection.description"
+	KeyCheckODataFix   Key = "check.odata-injection.remediation"
+
+	// Active check: a GraphQL endpoint answering schema queries.
+	KeyCheckGraphQLTitle Key = "check.graphql-introspection.title"
+	KeyCheckGraphQLDesc  Key = "check.graphql-introspection.description"
+	KeyCheckGraphQLFix   Key = "check.graphql-introspection.remediation"
+
+	// Active check: a cached response poisoned through an unkeyed header.
+	KeyCheckCachePoisonTitle Key = "check.cache-poisoning.title"
+	KeyCheckCachePoisonDesc  Key = "check.cache-poisoning.description"
+	KeyCheckCachePoisonFix   Key = "check.cache-poisoning.remediation"
+
 	// Active check: command injection.
 	KeyCheckCMDiTitle Key = "check.command-injection.title"
 	KeyCheckCMDiDesc  Key = "check.command-injection.description"
@@ -238,6 +313,16 @@ const (
 	KeyCheckUploadTitle Key = "check.upload.title"
 	KeyCheckUploadDesc  Key = "check.upload.description"
 	KeyCheckUploadFix   Key = "check.upload.remediation"
+
+	// Active check: stored cross-site scripting.
+	KeyCheckXSSStoredTitle Key = "check.xss-stored.title"
+	KeyCheckXSSStoredDesc  Key = "check.xss-stored.description"
+	KeyCheckXSSStoredFix   Key = "check.xss-stored.remediation"
+
+	// Active check: SQL injection into a sorting or limiting clause.
+	KeyCheckSQLiOrderByTitle Key = "check.sqli-order-by.title"
+	KeyCheckSQLiOrderByDesc  Key = "check.sqli-order-by.description"
+	KeyCheckSQLiOrderByFix   Key = "check.sqli-order-by.remediation"
 
 	// Active check: UNION-based SQL injection.
 	KeyCheckSQLiUnionTitle Key = "check.sqli-union.title"
@@ -276,6 +361,11 @@ const (
 	KeyEvidenceOOB        Key = "evidence.out-of-band"
 	KeyEvidenceIDOR       Key = "evidence.idor-comparison"
 	KeyEvidenceVariant    Key = "evidence.payload-variant"
+	KeyEvidenceAccessRule Key = "evidence.access-variant"
+	KeyEvidencePagination Key = "evidence.pagination"
+	KeyEvidenceTypeBypass Key = "evidence.type-bypass"
+	KeyEvidenceParser     Key = "evidence.parser-complaint"
+	KeyEvidenceCache      Key = "evidence.cache-poison"
 	KeyEvidenceTimingStat Key = "evidence.timing-statistics"
 	KeyEvidenceHPP        Key = "evidence.hpp"
 	KeyEvidenceWAF        Key = "evidence.waf-detected"
@@ -317,6 +407,13 @@ const (
 	KeyReportCurl             Key = "report.curl"
 	KeyReportCWE              Key = "report.cwe"
 
+	// What stood between the scan and the target. A refusal and a clean result look the
+	// same from the outside, so both are reported as facts a reader can weigh.
+	KeyReportBoundaryTitle    Key = "report.boundary-title"
+	KeyReportUnanswered       Key = "report.unanswered"
+	KeyReportProtectedTitle   Key = "report.protected-title"
+	KeyReportProtectedNothing Key = "report.protected-nothing"
+
 	// Severity names.
 	KeySeverityCritical Key = "severity.critical"
 	KeySeverityHigh     Key = "severity.high"
@@ -347,6 +444,8 @@ const (
 	KeyFlagTemplates    Key = "flag.templates"
 	KeyFlagSession      Key = "flag.session"
 	KeyFlagNoWAF        Key = "flag.no-waf"
+	KeyFlagNoAssumeWAF  Key = "flag.no-assume-waf"
+	KeyFlagNoDiscovery  Key = "flag.no-discovery"
 	KeyFlagUnsafeChecks Key = "flag.unsafe-checks"
 	KeyFlagCookie       Key = "flag.cookie"
 	KeyFlagHeader       Key = "flag.header"
@@ -369,6 +468,12 @@ const (
 	KeyMsgUnknownChecks       Key = "msg.unknown-checks"
 	KeyMsgChecksLoaded        Key = "msg.checks-loaded"
 	KeyMsgRequestError        Key = "msg.request-error"
+	KeyMsgUnanswered          Key = "msg.unanswered"
+	KeyMsgProtectedHost       Key = "msg.protected-host"
+	KeyMsgProtectedWithVendor Key = "msg.protected-with-vendor"
+	KeyMsgChecksOptIn         Key = "msg.checks-opt-in"
+	KeyMsgProbing             Key = "msg.probing"
+	KeyMsgSelfDescribed       Key = "msg.self-described"
 	KeyMsgTemplateLoaded      Key = "msg.templates-loaded"
 	KeyMsgChecksListed        Key = "msg.checks-listed"
 	KeyMsgOOBCallbackExample  Key = "msg.oob-callback-example"

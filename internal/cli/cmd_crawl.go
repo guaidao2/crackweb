@@ -16,17 +16,18 @@ import (
 // crawlOptions is the parsed command line of "crackweb crawl".
 type crawlOptions struct {
 	*requestOptions
-	url        *string
-	depth      *int
-	engine     *string
-	maxPages   *int
-	scope      *[]string
-	checks     *string
-	report     *string
-	listChecks *bool
-	oobHTTP    *string
-	oobDNS     *string
-	oobDomain  *string
+	url         *string
+	depth       *int
+	engine      *string
+	maxPages    *int
+	scope       *[]string
+	checks      *string
+	report      *string
+	listChecks  *bool
+	noDiscovery *bool
+	oobHTTP     *string
+	oobDNS      *string
+	oobDomain   *string
 }
 
 // newCrawlCommand builds the crawler command: discovery-driven scanning, for
@@ -44,6 +45,7 @@ func newCrawlCommand() *command {
 				checks:         fs.String("checks", "", "all", "<list>", i18n.KeyFlagChecks),
 				report:         fs.String("output", "o", "", "<file>", i18n.KeyFlagScanOutput),
 				listChecks:     fs.Bool("list-checks", "", i18n.KeyFlagListChecks),
+				noDiscovery:    fs.Bool("no-discovery", "", i18n.KeyFlagNoDiscovery),
 				oobHTTP:        fs.String("oob-http", "", "", "<addr>", i18n.KeyFlagHTTPAddr),
 				oobDNS:         fs.String("oob-dns", "", "", "<addr>", i18n.KeyFlagDNSAddr),
 				oobDomain:      fs.String("oob-domain", "", "", "<host>", i18n.KeyFlagOOBDomain),
@@ -102,7 +104,7 @@ func runCrawl(app *App, opts *crawlOptions, _ []string) error {
 		return err
 	}
 
-	checkCtx, scanner, err := opts.scanContext(app, client, oobServer, selected, false)
+	checkCtx, scanner, err := opts.scanContext(ctx, app, client, oobServer, selected, false)
 	if err != nil {
 		return err
 	}
@@ -112,6 +114,11 @@ func runCrawl(app *App, opts *crawlOptions, _ []string) error {
 		app.Note(i18n.KeyMsgChecksLoaded, len(selected), scanner.PassiveCount(), scanner.ActiveCount())
 	}
 	app.Note(i18n.KeyMsgScanStarted, *opts.url)
+	// Say it before it happens: the crawl asks for addresses the user did not name, and
+	// finding that out from a target's logs is the wrong way round.
+	if !*opts.noDiscovery {
+		app.Note(i18n.KeyMsgProbing)
+	}
 
 	store := sitemap.New(0)
 	// Cross-request checks need the traffic the crawl has collected so far.
@@ -124,6 +131,7 @@ func runCrawl(app *App, opts *crawlOptions, _ []string) error {
 		MaxPages:    *opts.maxPages,
 		Concurrency: *opts.threads,
 		Scope:       *opts.scope,
+		NoDiscovery: *opts.noDiscovery,
 		OnExchange: func(req *httpmsg.Request, resp *httpmsg.Response) {
 			store.Add(req, resp)
 			scanner.Submit(req, resp)
@@ -152,7 +160,12 @@ func runCrawl(app *App, opts *crawlOptions, _ []string) error {
 	}
 	if !app.Quiet {
 		app.Note(i18n.KeyMsgCrawlStats, crawlStats.Pages, crawlStats.Discovered, stats.Requests)
+		if crawlStats.Descriptions > 0 || crawlStats.SiteFiles > 0 {
+			app.Note(i18n.KeyMsgSelfDescribed, crawlStats.Descriptions, crawlStats.SiteFiles)
+		}
 	}
-	writeReport(app, *opts.report, *opts.url, store, scanner)
+	boundary := scanBoundary(stats, checkCtx)
+	app.noteBoundary(boundary)
+	writeReport(app, *opts.report, *opts.url, store, scanner, boundary)
 	return nil
 }

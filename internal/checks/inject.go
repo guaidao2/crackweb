@@ -2,6 +2,7 @@ package checks
 
 import (
 	"context"
+	"time"
 
 	"github.com/guaidao2/crackweb/internal/httpmsg"
 	"github.com/guaidao2/crackweb/internal/payload"
@@ -16,6 +17,16 @@ import (
 // searched for `<script>` would miss the `<ScRiPt>` variation that got past the
 // filter, and would report nothing exactly when the evasion worked.
 type Judge func(req *httpmsg.Request, resp *httpmsg.Response, variant payload.Variant) bool
+
+// assumeWAFGenerations is how far the walk goes on the assumption alone, with no evidence
+// that anything is filtering.
+//
+// Two, not one, and not by guesswork: the first generation spends its whole budget on
+// structural rewrites, so the encodings are reached only in the second — and a structural
+// rewrite wrapped in an encoding is the combination that defeats a WAF which normalises
+// once and matches once. The encoding gets past the normaliser, the rewrite gets past the
+// rule. Stopping at one generation would send the half that does not work.
+const assumeWAFGenerations = 2
 
 // Attempt is one payload that got through and was judged.
 type Attempt struct {
@@ -61,6 +72,19 @@ func (c *Context) SendVariants(
 	seeds []string,
 	judge Judge,
 ) (*Attempt, error) {
+	return c.SendVariantsTimed(ctx, t, kind, checkID, seeds, judge, 0)
+}
+
+// SendVariantsTimed is SendVariants with a deadline for each request it sends.
+func (c *Context) SendVariantsTimed(
+	ctx context.Context,
+	t *Target,
+	kind payload.Kind,
+	checkID string,
+	seeds []string,
+	judge Judge,
+	timeout time.Duration,
+) (*Attempt, error) {
 	if t == nil || t.Request == nil || t.Param == nil || len(seeds) == 0 {
 		return nil, nil
 	}
@@ -91,7 +115,7 @@ func (c *Context) SendVariants(
 		blockedSomething := false
 
 		for _, variant := range variants {
-			attempt, err := c.tryVariant(ctx, t, variant)
+			attempt, err := c.tryVariantTimed(ctx, t, variant, timeout)
 			if err != nil || attempt == nil {
 				continue
 			}
@@ -117,9 +141,17 @@ func (c *Context) SendVariants(
 		}
 
 		if !blockedSomething {
-			// Nothing was refused, so the target is not filtering. Mutation
-			// would only spend requests on a target that already answered.
-			return nil, nil
+			// Nothing was refused, so the target is not filtering, and mutation would only
+			// spend requests on a target that already answered.
+			//
+			// Unless the caller asked for the assumption to be made anyway. A target that
+			// rewrites a payload instead of refusing it gives this loop no evidence to act
+			// on, so under --assume-waf the first generation of mutations is tried even
+			// though nothing was refused. The generations after it still need that
+			// evidence: the assumption buys one round, not a blank cheque.
+			if !(c.AssumeWAF && generation+1 < len(generations) && generation < assumeWAFGenerations) {
+				return nil, nil
+			}
 		}
 		// Something was refused: escalate and try a stealthier wording.
 	}
@@ -144,9 +176,14 @@ func EncodingForVariant(variant payload.Variant) Encoding {
 
 // tryVariant sends one variant and reports whether the target refused it.
 func (c *Context) tryVariant(ctx context.Context, t *Target, variant payload.Variant) (*Attempt, error) {
+	return c.tryVariantTimed(ctx, t, variant, 0)
+}
+
+// tryVariantTimed sends one variant with a deadline of its own.
+func (c *Context) tryVariantTimed(ctx context.Context, t *Target, variant payload.Variant, timeout time.Duration) (*Attempt, error) {
 	encoding := EncodingForVariant(variant)
 
-	request, response, err := c.InjectEncoded(ctx, t, variant.Value, encoding)
+	request, response, err := c.InjectEncodedTimed(ctx, t, variant.Value, encoding, timeout)
 	if err != nil {
 		return nil, err
 	}

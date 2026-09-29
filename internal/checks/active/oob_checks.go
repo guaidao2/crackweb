@@ -23,6 +23,10 @@ var ssrfSeeds = []string{
 	checks.CallbackURL + "@example.com",
 	"http://example.com@" + checks.CallbackURL + "/",
 	"http://" + checks.CallbackURL + "/?url=" + checks.CallbackURL,
+	// The same address, written as one number. A filter that blocks the dotted form has
+	// blocked a spelling, not the address: one of these reaches the same callback.
+	"http://" + checks.CallbackHostDecimal + "/?url=" + checks.CallbackURL,
+	"http://" + checks.CallbackHostHex + "/?url=" + checks.CallbackURL,
 	"dict://" + checks.CallbackURL + "/",
 	"gopher://" + checks.CallbackURL + "/_",
 	"ftp://" + checks.CallbackURL + "/",

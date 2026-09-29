@@ -34,7 +34,14 @@ const (
 	// these limits only bite on a hardened one.
 	maxPerGeneration = 14
 	// maxSeeds bounds how many base payloads are expanded at once.
-	maxSeeds = 8
+	//
+	// Generation 0 is one request per seed, so this is what a check spends
+	// before any mutation happens. It has to be large enough for a check whose
+	// coverage *is* its seeds — cross-site scripting needs a distinct closing
+	// form for each context a payload can land in, and eight does not reach the
+	// attribute cases — and small enough that a target is not flooded. Checks
+	// with fewer seeds are unaffected: the limit is a ceiling, not a quota.
+	maxSeeds = 20
 )
 
 // Generations expands seeds into variants grouped by generation.

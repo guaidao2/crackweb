@@ -2,7 +2,9 @@ package checks
 
 import (
 	"context"
+	"net"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -19,6 +21,15 @@ const (
 	// CallbackHost is replaced with the bare authority, for payloads that cannot
 	// carry a URL — a DNS lookup in a shell command, for instance.
 	CallbackHost = "{callback_host}"
+	// CallbackHostDecimal and CallbackHostHex are the same authority written as one number.
+	//
+	// An address is a number, and the dotted form is one way to write it. A filter that
+	// blocks the dotted form — the usual allow-or-deny list of loopback and private ranges —
+	// has not blocked the address, only that spelling of it. These placeholders produce the
+	// decimal and hexadecimal spellings, and a payload carrying them is dropped when the
+	// callback is not an address to begin with.
+	CallbackHostDecimal = "{callback_host_dec}"
+	CallbackHostHex     = "{callback_host_hex}"
 )
 
 // OOBWait is how long an out-of-band check waits for a callback before moving
@@ -78,6 +89,12 @@ func (c *Context) ProbeOOB(
 			// Substitute first, encode afterwards: encoding the placeholder
 			// would leave nothing to substitute.
 			value := substituteCallback(seed, callbackURL)
+			if value == "" {
+				// The callback is reached by name, and this seed asked for a numeric
+				// spelling of it that does not exist. Sending the placeholder would test
+				// nothing.
+				continue
+			}
 
 			// One round of encoding is not evasion, it is what makes the request
 			// legal: a shell payload contains spaces and semicolons, and those
@@ -155,7 +172,8 @@ func (c *Context) awaitCallbacks(ctx context.Context, pending []pendingAttempt, 
 
 // substituteCallback replaces the callback placeholders in a payload.
 func substituteCallback(value, callbackURL string) string {
-	if !strings.Contains(value, CallbackURL) && !strings.Contains(value, CallbackHost) {
+	needsAlternate := strings.Contains(value, CallbackHostDecimal) || strings.Contains(value, CallbackHostHex)
+	if !needsAlternate && !strings.Contains(value, CallbackURL) && !strings.Contains(value, CallbackHost) {
 		return value
 	}
 	host := callbackURL
@@ -164,6 +182,45 @@ func substituteCallback(value, callbackURL string) string {
 	}
 	host = strings.TrimSuffix(host, "/")
 
+	if needsAlternate {
+		decimal, hexadecimal, ok := numericHostForms(host)
+		if !ok {
+			// The callback is reached by name, not by address, and a name has no numeric
+			// spelling. Dropping the payload is the honest answer: sending the placeholder
+			// would test nothing.
+			return ""
+		}
+		value = strings.ReplaceAll(value, CallbackHostDecimal, decimal)
+		value = strings.ReplaceAll(value, CallbackHostHex, hexadecimal)
+	}
+
 	out := strings.ReplaceAll(value, CallbackURL, callbackURL)
 	return strings.ReplaceAll(out, CallbackHost, host)
+}
+
+// numericHostForms rewrites an address into the spellings a blacklist of dotted quads does
+// not cover: as one decimal number, and as a hexadecimal one. The port, if there is one, is
+// carried through.
+func numericHostForms(host string) (decimal, hexadecimal string, ok bool) {
+	// The authority only: the callback URL carries a path, and a path is not part of the
+	// address. What replaces the placeholder is an authority, so the seed's own path stands.
+	authority := host
+	if slash := strings.Index(authority, "/"); slash >= 0 {
+		authority = authority[:slash]
+	}
+	address, port := authority, ""
+	if index := strings.LastIndex(authority, ":"); index >= 0 {
+		address, port = authority[:index], authority[index:]
+	}
+	parsed := net.ParseIP(address)
+	if parsed == nil {
+		return "", "", false
+	}
+	ip := parsed.To4()
+	if ip == nil {
+		return "", "", false
+	}
+	value := uint32(ip[0])<<24 | uint32(ip[1])<<16 | uint32(ip[2])<<8 | uint32(ip[3])
+	return strconv.FormatUint(uint64(value), 10) + port,
+		"0x" + strconv.FormatUint(uint64(value), 16) + port, true
 }

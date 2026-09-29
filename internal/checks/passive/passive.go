@@ -29,6 +29,12 @@ func init() {
 	checks.Register(cacheControl{})
 	checks.Register(directoryListing{})
 	checks.Register(cleartextPassword{})
+	checks.Register(subresourceIntegrity{})
+	checks.Register(errorDisclosure{})
+	checks.Register(contentDisclosure{})
+	checks.Register(privateKey{})
+	checks.Register(insecureTransport{})
+	checks.Register(vulnerableLibrary{})
 }
 
 // isHTML reports whether a response is HTML, which most passive checks care
@@ -85,6 +91,9 @@ func (securityHeaders) Run(_ context.Context, _ *checks.Context, t *checks.Targe
 	}
 	if header.Get("Referrer-Policy") == "" {
 		missing = append(missing, "Referrer-Policy")
+	}
+	if header.Get("Permissions-Policy") == "" {
+		missing = append(missing, "Permissions-Policy")
 	}
 	// HSTS is only meaningful, and only sent, over TLS.
 	if isHTTPS(t.Request) && header.Get("Strict-Transport-Security") == "" {

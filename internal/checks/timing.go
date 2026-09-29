@@ -50,6 +50,11 @@ const timingNoiseFloor = 150 * time.Millisecond
 // The encoding is a parameter rather than a decision made here, so that the
 // bytes measured are the bytes that were judged to be worth measuring.
 func (c *Context) MeasureTiming(ctx context.Context, t *Target, payload string, encoding Encoding, samples int) (TimingSample, error) {
+	return c.MeasureTimingTimed(ctx, t, payload, encoding, samples, 0)
+}
+
+// MeasureTimingTimed is MeasureTiming with a deadline for each sample.
+func (c *Context) MeasureTimingTimed(ctx context.Context, t *Target, payload string, encoding Encoding, samples int, timeout time.Duration) (TimingSample, error) {
 	if samples < 1 {
 		samples = 1
 	}
@@ -58,7 +63,7 @@ func (c *Context) MeasureTiming(ctx context.Context, t *Target, payload string, 
 		if err := ctx.Err(); err != nil {
 			break
 		}
-		_, response, err := c.InjectEncoded(ctx, t, payload, encoding)
+		_, response, err := c.InjectEncodedTimed(ctx, t, payload, encoding, timeout)
 		if err != nil || response == nil {
 			continue
 		}

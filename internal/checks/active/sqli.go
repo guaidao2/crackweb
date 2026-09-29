@@ -30,6 +30,8 @@ func init() {
 	checks.Register(sqliBoolean{})
 	checks.Register(sqliTime{})
 	checks.Register(sqliUnion{})
+	checks.Register(sqliOrderBy{})
+	checks.Register(xssStored{})
 	checks.Register(xssReflected{})
 	checks.Register(pathTraversal{})
 	checks.Register(ssti{})
@@ -38,6 +40,15 @@ func init() {
 	checks.Register(nosqli{})
 	checks.Register(ssrf{})
 	checks.Register(accessControl{})
+	checks.Register(accessControlVariants{})
+	checks.Register(paginationBypass{})
+	checks.Register(parameterTypeBypass{})
+	checks.Register(ldapInjection{})
+	checks.Register(xpathInjection{})
+	checks.Register(odataInjection{})
+	checks.Register(graphqlIntrospection{})
+	checks.Register(cachePoisoning{})
+	checks.Register(domXSS{})
 	checks.Register(xxe{})
 	checks.Register(jwt{})
 	checks.Register(csrf{})
@@ -70,6 +81,15 @@ var sqlErrorSignatures = []string{
 	"pg::syntaxerror",
 	"sqlite3.operationalerror",
 	"sqlite error",
+	// A driver often reports its exception class rather than the module path, and the
+	// exception names are the same across the DB-API: bare `OperationalError` is what a
+	// SQLite or PostgreSQL driver prints, and matching only the dotted spelling misses it.
+	"operationalerror",
+	"programmingerror",
+	"integrityerror",
+	"unrecognized token",
+	"psycopg2",
+	"sqlalchemy.exc",
 	"ora-0",
 	"oracle error",
 	"invalid query",
@@ -94,6 +114,19 @@ var sqlErrorSeeds = []string{
 	"' AND extractvalue(1,concat(0x7e,version()))-- -",
 	"' AND updatexml(1,concat(0x7e,user()),1)-- -",
 	"';SELECT 1/0-- -",
+
+	// ORDER BY and LIMIT take an expression but not a quoted string, and no
+	// amount of quoting will help — so a parameter that reaches one of them is
+	// invisible to every seed above. These append another term to whatever the
+	// caller already supplied, which is the only way in: the position accepts a
+	// comma-separated list.
+	",(select 1)",
+	"1,(select 1)",
+	"1 ASC,(select 1)",
+	" desc,(select 1)",
+	",1/0",
+	",(select 1/0)",
+	" PROCEDURE ANALYSE(1,1)",
 }
 
 // sqliError detects error-based SQL injection.
@@ -425,7 +458,26 @@ var sqliTimingSuffixes = []struct {
 	{"' AND SLEEP(5)-- -", 5 * time.Second},
 	{"' AND (SELECT 1 FROM (SELECT SLEEP(5))x)-- -", 5 * time.Second},
 	{"; WAITFOR DELAY '0:0:5'--", 5 * time.Second},
+	// The same delay without a statement separator. `;` ends the statement, and
+	// an application that passes the parameter to a command object — or a filter
+	// that blocks the character — never reaches the second statement at all.
+	// Here the pause is nested inside the condition instead, which needs no
+	// separator and no comment to close the original string.
+	{"' AND (SELECT 1)>0 WAITFOR DELAY '0:0:5'--", 5 * time.Second},
+	{"' AND 1=(SELECT 1) AND 1=1 WAITFOR DELAY '0:0:5'--", 5 * time.Second},
 	{"' AND pg_sleep(5)-- -", 5 * time.Second},
+}
+
+// timingBudget is how long a request that is meant to make the server wait is
+// given.
+//
+// Three times the requested delay covers a server that overruns it — which real
+// ones do under load — and the flat ten seconds covers the round trip and the
+// target's own response time. The alternative, raising the client's deadline,
+// would slow down every other request in the scan to serve the handful that
+// need it.
+func timingBudget(delay time.Duration) time.Duration {
+	return delay*3 + 10*time.Second
 }
 
 // sqliTimePayloadsFor builds the delay payloads for one parameter value.
@@ -477,26 +529,33 @@ func (sqliTime) Run(ctx context.Context, c *checks.Context, t *checks.Target) []
 	c.ProbeWAF(ctx, t)
 
 	for _, candidate := range sqliTimePayloadsFor(t.Param.Value) {
+		// Every request in this check is meant to take as long as it asked for,
+		// and possibly longer: a server under load overruns its own delay, and
+		// the exchange is cut off before the answer arrives if the deadline is
+		// the client's ordinary one. That failure is indistinguishable from a
+		// target that did not pause, so the finding disappears silently.
+		budget := timingBudget(candidate.delay)
+
 		// The mutation engine finds a wording the target's filter lets through;
 		// a cheap single-shot comparison decides whether it is worth measuring.
-		attempt, err := c.SendVariants(ctx, t, payload.SQLi, "sqli-time", []string{candidate.payload},
+		attempt, err := c.SendVariantsTimed(ctx, t, payload.SQLi, "sqli-time", []string{candidate.payload},
 			func(_ *httpmsg.Request, resp *httpmsg.Response, _ payload.Variant) bool {
 				// Deliberately permissive: a quarter of the requested pause is
 				// enough to justify the requests a real measurement costs. The
 				// strict verdict comes next.
 				return resp.Duration >= candidate.delay/4
-			})
+			}, budget)
 		if err != nil || attempt == nil {
 			continue
 		}
 
 		// Measure both sides the same way, then decide.
 		encoding := checks.EncodingForVariant(attempt.Variant)
-		baseline, err := c.MeasureTiming(ctx, t, t.Param.Value, encoding, checks.DefaultTimingSamples)
+		baseline, err := c.MeasureTimingTimed(ctx, t, t.Param.Value, encoding, checks.DefaultTimingSamples, budget)
 		if err != nil {
 			continue
 		}
-		injected, err := c.MeasureTiming(ctx, t, attempt.Variant.Value, encoding, checks.DefaultTimingSamples)
+		injected, err := c.MeasureTimingTimed(ctx, t, attempt.Variant.Value, encoding, checks.DefaultTimingSamples, budget)
 		if err != nil {
 			continue
 		}

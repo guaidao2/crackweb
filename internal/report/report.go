@@ -36,8 +36,53 @@ type Data struct {
 	Hosts     []string
 	Endpoints int
 	Requests  int
+	// Boundary says what stood between the scan and the target. A result that only looks
+	// clean is worth saying so about: a refusal and an absence look the same from outside.
+	Boundary Boundary
 	// Findings are the deduplicated results, already sorted.
 	Findings []*finding.Finding
+}
+
+// Boundary is what stood between the scan and the target.
+//
+// It carries no conclusion. What a reader needs is the fact that something answered in front
+// of the application and how far the payloads had to be raised to get past it; whether that
+// makes a result incomplete is theirs to judge, and a tool that decided for them would be
+// reporting a guess.
+type Boundary struct {
+	// Unanswered is how many requests never produced a response.
+	Unanswered int
+	// Protected lists the hosts where a refusal pattern was detected.
+	Protected []ProtectedHost
+}
+
+// ProtectedHost is one host where something answered for the application.
+type ProtectedHost struct {
+	Host   string
+	Vendor string
+}
+
+// boundaryLines renders a boundary as the sentences a report shows. It returns nothing when
+// there is nothing to say, so a clean run does not grow a section that only says so.
+func boundaryLines(bundle *i18n.Bundle, boundary Boundary) []string {
+	if bundle == nil {
+		bundle = i18n.New(i18n.Default)
+	}
+	var lines []string
+	if boundary.Unanswered > 0 {
+		lines = append(lines, bundle.T(i18n.KeyReportUnanswered, boundary.Unanswered))
+	}
+	if len(boundary.Protected) > 0 {
+		lines = append(lines, bundle.T(i18n.KeyReportProtectedTitle))
+		for _, host := range boundary.Protected {
+			if host.Vendor != "" {
+				lines = append(lines, "  - "+host.Host+" ("+host.Vendor+")")
+				continue
+			}
+			lines = append(lines, "  - "+host.Host)
+		}
+	}
+	return lines
 }
 
 // Duration is the scan's wall-clock time.
@@ -270,7 +315,19 @@ type jsonReport struct {
 	Endpoints int           `json:"endpoints"`
 	Requests  int           `json:"requests"`
 	Summary   jsonSummary   `json:"summary"`
+	Boundary  jsonBoundary  `json:"boundary"`
 	Findings  []jsonFinding `json:"findings"`
+}
+
+// jsonBoundary is the coverage boundary in the form a machine reads it.
+type jsonBoundary struct {
+	Unanswered int                 `json:"unanswered"`
+	Protected  []jsonProtectedHost `json:"protected,omitempty"`
+}
+
+type jsonProtectedHost struct {
+	Host   string `json:"host"`
+	Vendor string `json:"vendor,omitempty"`
 }
 
 // jsonSummary is the per-severity tally.
@@ -333,7 +390,16 @@ func JSON(w io.Writer, data *Data) error {
 			Low:      counts[finding.SeverityLow],
 			Info:     counts[finding.SeverityInfo],
 		},
+		Boundary: jsonBoundary{
+			Unanswered: data.Boundary.Unanswered,
+			Protected:  make([]jsonProtectedHost, 0, len(data.Boundary.Protected)),
+		},
 		Findings: make([]jsonFinding, 0, len(data.Findings)),
+	}
+
+	for _, host := range data.Boundary.Protected {
+		out.Boundary.Protected = append(out.Boundary.Protected,
+			jsonProtectedHost{Host: host.Host, Vendor: host.Vendor})
 	}
 
 	for _, f := range data.Findings {

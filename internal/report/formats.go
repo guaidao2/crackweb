@@ -224,6 +224,17 @@ func Markdown(w io.Writer, data *Data) error {
 	}
 	fmt.Fprintf(out, "\n")
 
+	// The boundary comes before the findings, and before the "nothing found" early return:
+	// whether a result is complete decides how the list under it should be read, and that
+	// matters most in exactly the case where the list is empty.
+	if boundary := boundaryLines(bundle, data.Boundary); len(boundary) > 0 {
+		fmt.Fprintf(out, "## %s\n\n", bundle.T(i18n.KeyReportBoundaryTitle))
+		for _, line := range boundary {
+			fmt.Fprintf(out, "- %s\n", line)
+		}
+		fmt.Fprintf(out, "\n")
+	}
+
 	if len(data.Findings) == 0 {
 		fmt.Fprintf(out, "%s\n\n", bundle.T(i18n.KeyReportNoFindings))
 		fmt.Fprintf(out, "---\n\n> %s\n", bundle.T(i18n.KeyAppDisclaimer))

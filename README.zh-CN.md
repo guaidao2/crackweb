@@ -117,7 +117,7 @@ crackweb oob --domain oob.example.com      # 也可独立部署在目标能回�
 
 | 检测项 | 发现什么 |
 | --- | --- |
-| `passive-security-headers` | 缺少 CSP、HSTS、X-Content-Type-Options、X-Frame-Options、Referrer-Policy |
+| `passive-security-headers` | 缺少 CSP、HSTS、X-Content-Type-Options、X-Frame-Options、Referrer-Policy、Permissions-Policy |
 | `passive-cookie-flags` | Cookie 缺少 Secure、HttpOnly 或 SameSite |
 | `passive-cors` | 回显 Origin 或使用通配符的 `Access-Control-Allow-Origin`，且允许携带凭据 |
 | `passive-info-disclosure` | `Server`、`X-Powered-By` 等响应头泄露版本号 |
@@ -125,6 +125,12 @@ crackweb oob --domain oob.example.com      # 也可独立部署在目标能回�
 | `passive-cache-control` | 建立会话的响应可能被缓存 |
 | `passive-directory-listing` | 自动生成的目录索引 |
 | `passive-cleartext-password` | 凭据经 http:// 提交 —— 报告中绝不复现其值 |
+| `passive-sri` | 从其它源加载的脚本与样式表未携带 Subresource Integrity 哈希 |
+| `passive-error-disclosure` | 响应体中出现调用栈或框架报错信息 |
+| `passive-content-disclosure` | 响应体中出现内网 IP、服务端路径或邮箱地址 |
+| `passive-private-key` | 通过 HTTP 提供了 PEM 私钥 —— 报告中绝不复现密钥内容 |
+| `passive-insecure-transport` | 密码输入框通过明文 HTTP 提供 |
+| `passive-vulnerable-library` | 前端库的版本存在已公开漏洞，报告中点名对应的安全公告 |
 
 **主动检测** —— 发送 payload 并根据返回结果判定。
 
@@ -135,6 +141,8 @@ crackweb oob --domain oob.example.com      # 也可独立部署在目标能回�
 | `sqli-union` | 严重 |
 | `sqli-time` | 高危 |
 | `xss-reflected` | 高危 |
+| `xss-stored` | 高危 |
+| `sqli-order-by` | 高危 |
 | `path-traversal` | 高危 |
 | `ssti` | 高危 |
 | `ssrf` | 高危 |
@@ -151,6 +159,15 @@ crackweb oob --domain oob.example.com      # 也可独立部署在目标能回�
 | `host-header` | 中危 |
 | `method-override` | 中危 |
 | `idor` | 高危（需要两个会话） |
+| `access-control-variants` | 高危（仅在被 401/403 拒绝时运行） |
+| `pagination-bypass` | 中危 |
+| `parameter-type-bypass` | 中危 |
+| `dom-xss` | 高危（需显式开启：会在浏览器里真实加载并执行页面） |
+| `ldap-injection` | 高危 |
+| `xpath-injection` | 高危 |
+| `odata-injection` | 高危 |
+| `graphql-introspection` | 低危 |
+| `cache-poisoning` | 高危（需显式开启：会写入共享缓存） |
 | `request-smuggling` | 高危（需显式开启） |
 
 按名字或标签筛选：`--checks sqli`、`--checks injection`、`--checks all`。
@@ -188,6 +205,12 @@ crackweb scan -u https://staging.example.com --enable-unsafe-checks --checks all
 
 两种方式都会在发包前主动声明。
 
+`dom-xss` 需显式开启是出于另一个原因：它会把页面放进真实浏览器里加载，而浏览器会执行页面携带的每一个脚本 —— 包括去拉取后续数据的，以及去写数据的。对页面本身带副作用的系统而言，这已经超出了“测试它收到的那个请求”的范围。按名字选中它，或加 `--enable-unsafe-checks`，即表示同意；机器上没有浏览器时，该检查不会报任何结果，而不是去猜。
+
+```sh
+crackweb scan -u https://app.example.com/page --checks dom-xss
+```
+
 ## WAF 规避
 
 一个自带固定 payload（`' OR 1=1--`、`<script>alert(1)</script>`）的扫描器，
@@ -216,8 +239,19 @@ crackweb scan -u https://staging.example.com --enable-unsafe-checks --checks all
 判错一次，后续每个 payload 都会白白多跑几代。
 
 ```sh
-crackweb scan -u https://example.com --no-waf    # 关闭探测与变形
+crackweb scan -u https://example.com --no-waf        # 连厂商指纹探测一起关掉
+crackweb scan -u https://example.com --no-assume-waf # 已知无防护时，省下那两代请求
 ```
+
+但探测有个它解决不了的场景：**现代边缘常常改写 payload 却回 `200`**，
+响应里没有任何东西表明它过滤过。这种目标上，升级规则永远不会触发 —— 它依赖的那份证据
+恰恰是被扣下的 —— 而那些变异（真正能穿过去的部分）就永远不会被发出去。
+
+所以 crackweb **不等这份证据**：它**假定前面就是有防护**，无论是否被拒绝，
+每个 payload 都额外发送前两代。是两代而不是一代，因为第一代的预算全花在结构变异上，
+而能击败「规范化一次、匹配一次」那种防护的组合（一次改写套一层编码）要到第二代才出现。
+代价是真实的：对没有防护的目标，请求量大约变成四倍。`--no-assume-waf` 保留探测但去掉这个假定，
+适用于你已经知道前面什么都没有的目标。
 
 ## 高级技巧
 
@@ -231,6 +265,7 @@ crackweb scan -u https://example.com --no-waf    # 关闭探测与变形
 | **路径规范化** | `//etc/passwd`、`/.//etc/passwd`、`/etc//passwd` —— 针对那些正确剥掉了 `../`、却把 `//` 折叠错的实现。 |
 | **二次注入** | 用一个请求把 payload 写进去，再重放**已观察到的**页面，看读回它时是否破坏了什么。比对基准是这些页面在写入**之前**的响应，所以证据是"写入造成的改变"。 |
 | **带外盲测** | 盲 SSRF、命令注入、XXE 在响应里什么都不留。每次探测植入一个唯一回调地址，证据随后从另一个监听器到达。 |
+| **编码后的参数文档** | 参数值本身是一段 JSON（无论是否再经 base64 包装）时，会把它展开并逐个字段测试。每次变异都会把外层信封重新拼好，让文档里的 payload 仍以合法输入抵达应用，而不是把承载它的那个参数弄坏。 |
 
 ## 登录态扫描
 
@@ -327,6 +362,9 @@ HTML 报告是一个自包含的单文件：严重性概览、过滤框，以及
 包含说明、修复建议、命中的证据、原始请求、响应、用于比对的基线，以及可直接粘贴的 `curl` 复现命令。
 它跟随阅读者的浅色/深色偏好，并且打印排版干净。
 
+报告里还会带上**覆盖边界**：有多少请求没有拿到响应，以及哪些主机前面有东西代替应用作答。
+从外面看，一次被拒绝的扫描和一次干净的扫描长得一样，所以报告直接说明是哪一种，而不是留给读者去猜。
+
 SARIF 输出可直接接入 GitHub code scanning。
 
 ## 性能
@@ -363,6 +401,29 @@ crackweb 按这个顺序查找：`CRACKWEB_CHROME` → `PATH` → 各平台实�
 （包含 Edge —— 每台 Windows 都有）→ Playwright / Puppeteer 留下的浏览器缓存。
 一个都找不到时，它只提示一次，然后继续用不需要浏览器的 HTTP 引擎 ——
 所以没有 Chromium 的机器上 `--engine hybrid` 依然能爬，只是对 JavaScript 的覆盖浅一些。
+
+**浏览器自己发出的请求会被原样重放。** 爬虫的原则是：扫描器看到的一切请求都由 HTTP 引擎发出，
+这样只有一条代码路径在生产它们。带着 body 的请求是这条原则覆盖不到的例外：
+请求的方法、字节与 Content-Type 是页面脚本自己决定的，而这些都无法从它发往的地址反推出来。
+把那个地址当成 GET 去取，会完全错过这个端点 —— 浏览器一路在用的 JSON API 就是这样变成"没测过"的。
+所以这类请求会按它发出去的原样再发一次，发 JSON 的页面因此和别的页面一样被扫描。
+没有 body 的 POST 不动它：没有参数可测，而重发它确实会产生影响。
+
+**会读取对外发布的 API 描述。** 一份 OpenAPI / Swagger 文档是扫描器能拿到的最好输入 ——
+每一条 path、每一个方法，以及各自的参数 —— 而它列出的东西里，大部分靠跟随链接是到不了的，
+因为没有任何地方链接到一个 API。crackweb 会去问这类文档常见的发布地址，
+会跟随页面或脚本指向的那些（Swagger UI 会在自己的初始化脚本里带上地址），
+两种版本的格式都会读，并把每个 operation 变成一个请求：path 与 query 参数按声明的类型填值，
+请求体按 schema 生成，然后像任何其它请求一样交给扫描器。文档可以点名任意主机，
+但真正发出请求之前，会先按 scope 过滤它点名的对象。
+
+**站点的 robots 文件与 sitemap 也会读**，理由正好相反。sitemap 是一份不用爬就能拿到的页面清单，
+而且它是可嵌套的 —— 索引指向更多 sitemap，那些也会被跟随。robots 文件列的是站点不希望别人去看的东西，
+而那里往往正是有价值的目标：写进去的每一条，都是有人决定不去链接的路径。读它是**刻意的选择，不是疏忽** ——
+这条约定是为搜索引擎立的，它们要避免成为麻烦；而一次经授权的扫描问的是另一个问题。
+这些路径会像其它地址一样被请求，并在日志里标明来源。只有真正指名路径的条目才会被采用：
+空值表示“全部允许”，单独一个 `/` 表示“全部禁止”，而带 `*` 或 `$` 的是模式而不是地址。`--no-discovery` 可以把这一整套关掉，
+适用于那种“连一个用户没有点名的地址都嫌多”的目标。
 
 ## 项目结构
 

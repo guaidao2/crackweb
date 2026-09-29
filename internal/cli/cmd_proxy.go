@@ -103,7 +103,7 @@ func runProxy(app *App, opts *proxyOptions, _ []string) error {
 		return err
 	}
 
-	checkCtx, scanner, err := opts.scanContext(app, client, oobServer, selected, *opts.passiveOnly)
+	checkCtx, scanner, err := opts.scanContext(ctx, app, client, oobServer, selected, *opts.passiveOnly)
 	if err != nil {
 		return err
 	}
@@ -155,7 +155,9 @@ func runProxy(app *App, opts *proxyOptions, _ []string) error {
 	if len(scanner.Findings()) == 0 {
 		app.Note(i18n.KeyMsgNoFindings)
 	}
-	writeReport(app, *opts.report, *opts.listen, store, scanner)
+	boundary := scanBoundary(scanner.Stats(), checkCtx)
+	app.noteBoundary(boundary)
+	writeReport(app, *opts.report, *opts.listen, store, scanner, boundary)
 
 	if serveErr != nil {
 		return serveErr

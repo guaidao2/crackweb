@@ -36,9 +36,11 @@ type htmlView struct {
 	Requests  int
 	Total     int
 	MaxCount  int
-	Cards     []severityCard
-	Findings  []findingCard
-	Labels    htmlLabels
+	// Boundary holds the sentences about what stood between the scan and the target.
+	Boundary []string
+	Cards    []severityCard
+	Findings []findingCard
+	Labels   htmlLabels
 }
 
 // severityCard is one bucket in the summary strip.
@@ -92,6 +94,7 @@ type htmlLabels struct {
 	Hosts       string
 	Endpoints   string
 	Requests    string
+	Boundary    string
 	Findings    string
 	NoFindings  string
 	Filter      string
@@ -142,8 +145,10 @@ func buildHTMLView(data *Data) *htmlView {
 		Endpoints: data.Endpoints,
 		Requests:  data.Requests,
 		Total:     len(data.Findings),
+		Boundary:  boundaryLines(bundle, data.Boundary),
 		Labels: htmlLabels{
 			Summary:     bundle.T(i18n.KeyReportSummary),
+			Boundary:    bundle.T(i18n.KeyReportBoundaryTitle),
 			Target:      bundle.T(i18n.KeyReportTarget),
 			Started:     bundle.T(i18n.KeyReportStarted),
 			Finished:    bundle.T(i18n.KeyReportFinished),

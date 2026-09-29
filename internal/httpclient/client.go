@@ -128,9 +128,14 @@ func New(opts Options) (*Client, error) {
 	}
 
 	c := &Client{opts: opts}
+	// The deadline is applied per request, from Request.Timeout or this default,
+	// rather than set on the client. http.Client.Timeout cannot be narrowed or
+	// widened for a single exchange, so a check that asks the server to wait
+	// would be cut off by it with no way to say otherwise — and the failure
+	// looks exactly like a target that did not wait.
 	c.hg = &http.Client{
 		Transport: transport,
-		Timeout:   opts.Timeout,
+		Timeout:   0,
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			if !opts.FollowRedirects {
 				return http.ErrUseLastResponse
@@ -192,6 +197,22 @@ func (c *Client) Do(ctx context.Context, req *httpmsg.Request) (*httpmsg.Respons
 
 // attempt performs a single request/response exchange.
 func (c *Client) attempt(ctx context.Context, req *httpmsg.Request) (*httpmsg.Response, error) {
+	// A request may carry its own deadline; see httpmsg.Request.Timeout. It is
+	// applied here rather than in buildRequest so the cancel can be deferred
+	// until the response has been read — releasing it earlier would cut the
+	// body off, and never releasing it would leak the timer.
+	// One place decides the deadline: the request's own if it has one, otherwise
+	// the client's default.
+	deadline := req.Timeout
+	if deadline <= 0 {
+		deadline = c.opts.Timeout
+	}
+	if deadline > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, deadline)
+		defer cancel()
+	}
+
 	httpReq, err := c.buildRequest(ctx, req)
 	if err != nil {
 		return nil, err

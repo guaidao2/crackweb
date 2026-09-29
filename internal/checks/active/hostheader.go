@@ -91,6 +91,14 @@ func (hostHeader) Run(ctx context.Context, c *checks.Context, t *checks.Target) 
 		if !reflectedInBody && !reflectedInLocation {
 			continue
 		}
+		// A page that prints the request it received is not a page that used the value.
+		// Developer consoles, error handlers and debug endpoints routinely dump the whole
+		// request, headers and all, and the reflected canary inside such a dump is the page
+		// quoting itself — the most common way this check produces a finding that has to be
+		// dismissed by hand.
+		if reflectedInBody && !reflectedInLocation && echoOnlyInBody(body, header, hostCanary) {
+			continue
+		}
 
 		f := checks.NewFinding(hostHeader{}, t,
 			i18n.KeyCheckHostHeaderTitle, i18n.KeyCheckHostHeaderDesc, i18n.KeyCheckHostHeaderFix)
@@ -120,6 +128,39 @@ func (hostHeader) Run(ctx context.Context, c *checks.Context, t *checks.Target) 
 		return []*finding.Finding{f}
 	}
 	return nil
+}
+
+// echoOnlyInBody reports whether every appearance of the canary in the body sits right
+// after the header name it was sent in — which is what a page looks like when it printed
+// its own request, and what an application that merely reports the header it received
+// looks like too. Anything else means the value reached a place the application built
+// itself, which is the finding worth reporting.
+func echoOnlyInBody(body, header, canary string) bool {
+	seen := false
+	rest := body
+	for {
+		index := strings.Index(rest, canary)
+		if index < 0 {
+			return seen
+		}
+		seen = true
+		if !prefixedByHeaderName(rest[:index], header) {
+			return false
+		}
+		rest = rest[index+len(canary):]
+	}
+}
+
+// prefixedByHeaderName reports whether the text immediately before a value reads
+// "<header>:" at the start of its line.
+func prefixedByHeaderName(before, header string) bool {
+	lineStart := strings.LastIndexAny(before, "\r\n") + 1
+	line := before[lineStart:]
+	colon := strings.IndexByte(line, ':')
+	if colon < 0 {
+		return false
+	}
+	return strings.EqualFold(strings.TrimSpace(line[:colon]), header)
 }
 
 // Ensure httpmsg stays referenced by the clone helper above.

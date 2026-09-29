@@ -98,7 +98,7 @@ func runScan(app *App, opts *scanOptions, _ []string) error {
 		return err
 	}
 
-	checkCtx, scanner, err := opts.scanContext(app, client, oobServer, selected, false)
+	checkCtx, scanner, err := opts.scanContext(ctx, app, client, oobServer, selected, false)
 	if err != nil {
 		return err
 	}
@@ -133,7 +133,9 @@ func runScan(app *App, opts *scanOptions, _ []string) error {
 	} else {
 		app.Note(i18n.KeyMsgScanFinished, len(findings), stats.Requests, humanDurationText(stats.Elapsed))
 	}
-	writeReport(app, *opts.output, request.URLString(), store, scanner)
+	boundary := scanBoundary(stats, checkCtx)
+	app.noteBoundary(boundary)
+	writeReport(app, *opts.output, request.URLString(), store, scanner, boundary)
 	return nil
 }
 

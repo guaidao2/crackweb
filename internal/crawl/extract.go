@@ -1,6 +1,8 @@
 package crawl
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"net/url"
 	"regexp"
 	"strings"
@@ -22,6 +24,9 @@ type Form struct {
 	Action string
 	// Method is the form method, upper-cased.
 	Method string
+	// Enctype is the form's encoding, lower-cased. It decides how the body has to be
+	// built, and getting it wrong means the submission never reaches the code under test.
+	Enctype string
 	// Fields are the form's inputs.
 	Fields []Field
 }
@@ -73,6 +78,79 @@ func (f Form) EncodeBody() string {
 		values.Add(field.Name, field.Value)
 	}
 	return values.Encode()
+}
+
+// IsMultipart reports whether the form has to be submitted as multipart/form-data. A form
+// that declares it does, and a form carrying a file input does whether it declares it or
+// not — a server expecting an upload rejects a urlencoded body before it looks at
+// anything in it, so submitting one that way tests nothing.
+func (f Form) IsMultipart() bool {
+	if strings.Contains(f.Enctype, "multipart/form-data") {
+		return true
+	}
+	for _, field := range f.Fields {
+		if strings.EqualFold(field.Type, "file") {
+			return true
+		}
+	}
+	return false
+}
+
+// EncodeMultipart renders the form as a multipart/form-data body and returns it with the
+// Content-Type that goes with it.
+//
+// A file input is filled with a small placeholder. The crawler is not uploading anything
+// real, and a field left empty is the one thing an upload endpoint refuses outright — an
+// empty file part would hide the whole form behind a validation error, which is exactly
+// the outcome that makes an upload endpoint look untestable.
+func (f Form) EncodeMultipart() ([]byte, string) {
+	boundary := "crackweb-" + randomBoundary()
+	var body strings.Builder
+
+	for _, field := range f.Fields {
+		if field.Name == "" {
+			continue
+		}
+		switch strings.ToLower(field.Type) {
+		case "submit", "button", "image", "reset":
+			continue
+		}
+		body.WriteString("--" + boundary + "\r\n")
+		if strings.EqualFold(field.Type, "file") {
+			body.WriteString("Content-Disposition: form-data; name=\"" + field.Name +
+				"\"; filename=\"" + placeholderUploadName + "\"\r\n")
+			// An upload endpoint that checks the media type is checking this header, and
+			// it comes from the sender — so sending a picture's type is what gets the
+			// submission as far as the code that handles it. `application/octet-stream`
+			// is refused by anything that requires an image before it looks further.
+			body.WriteString("Content-Type: image/png\r\n\r\n")
+			body.WriteString(placeholderUploadBody)
+			body.WriteString("\r\n")
+			continue
+		}
+		body.WriteString("Content-Disposition: form-data; name=\"" + field.Name + "\"\r\n\r\n")
+		body.WriteString(field.Value)
+		body.WriteString("\r\n")
+	}
+	body.WriteString("--" + boundary + "--\r\n")
+
+	return []byte(body.String()), "multipart/form-data; boundary=" + boundary
+}
+
+// The placeholder a crawled upload form is submitted with.
+const (
+	placeholderUploadName = "crackweb-upload.txt"
+	placeholderUploadBody = "crackweb upload"
+)
+
+// randomBoundary returns a multipart boundary that will not collide with anything in the
+// field values.
+func randomBoundary() string {
+	var raw [12]byte
+	if _, err := rand.Read(raw[:]); err != nil {
+		return "crackwebboundary"
+	}
+	return hex.EncodeToString(raw[:])
 }
 
 // jsURLRe finds URL-ish string literals inside inline script, which is where
@@ -156,8 +234,9 @@ func Parse(document string, base *url.URL) (*Page, error) {
 // buildForm walks a form's controls.
 func buildForm(node *html.Node, base *url.URL) Form {
 	form := Form{
-		Action: attr(node, "action"),
-		Method: strings.ToUpper(strings.TrimSpace(attr(node, "method"))),
+		Action:  attr(node, "action"),
+		Method:  strings.ToUpper(strings.TrimSpace(attr(node, "method"))),
+		Enctype: strings.ToLower(strings.TrimSpace(attr(node, "enctype"))),
 	}
 	if form.Method == "" {
 		form.Method = "GET"

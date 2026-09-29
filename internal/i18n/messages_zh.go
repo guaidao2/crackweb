@@ -63,7 +63,7 @@ var chinese = map[Key]string{
 	KeyFlagScanData:   "请求体；带有请求体时默认按表单 POST 发送。",
 	KeyFlagScanHeader: "额外的请求头，例如 'Cookie: a=b'；可重复。",
 	KeyFlagRaw:        "从原始 HTTP 请求文件读取要扫描的请求，例如 Burp 保存的报文。",
-	KeyFlagChecks:     "逗号分隔的检测项名称，或 all。",
+	KeyFlagChecks:     "逗号分隔的检测项名称或标签，或 all。标为「需显式开启」的检测项不会被 all 拉进来。",
 	KeyFlagScanOutput: "报告输出路径，格式由扩展名决定（.html、.json、.sarif、.md）。",
 
 	KeyFlagDNSAddr:   "DNS 交互服务器的监听地址，例如 0.0.0.0:5353。",
@@ -158,6 +158,44 @@ var chinese = map[Key]string{
 	KeyCheckDirListingFix: "关闭自动目录索引（Apache 的 Options -Indexes，nginx 的 autoindex off），" +
 		"并清理本不应对外提供的文件。",
 
+	KeyCheckSRITitle: "第三方子资源未做完整性校验",
+	KeyCheckSRIDesc: "页面从其它源加载了脚本或样式表，却没有携带 Subresource Integrity " +
+		"哈希。一旦那个源被入侵，或者文件被替换，浏览器就会执行它拿到的任何内容，而页面无从察觉。",
+	KeyCheckSRIFix: "为每一个跨源加载的脚本与样式表补上 integrity 属性（SHA-256 或更强），" +
+		"并加上 crossorigin，否则浏览器不会真正执行该校验。",
+
+	KeyCheckErrorDisclosureTitle: "泄露了应用报错细节",
+	KeyCheckErrorDisclosureDesc: "响应中带有调用栈或框架报错信息，暴露了内部组件、" +
+		"文件路径与依赖库版本，往往还直接指出了应用是在哪个输入上出错的。",
+	KeyCheckErrorDisclosureFix: "在应用边界统一兜住异常，对外只返回通用提示与一个便于检索的" +
+		"关联 ID；详细报错写入服务端日志，并在生产环境关闭框架的调试模式。",
+
+	KeyCheckContentDisclosureTitle: "泄露了内网地址、路径或邮箱",
+	KeyCheckContentDisclosureDesc: "响应体里出现了描述部署环境而非页面内容的信息：" +
+		"内网 IP、服务端文件路径或邮箱地址。这些都不应出现在对外响应中，" +
+		"而合在一起足以让攻击者摸清站点背后的基础设施。",
+	KeyCheckContentDisclosureFix: "从访客可读的一切内容中移除部署细节：改造错误页使其不再打印路径，" +
+		"并让生成的页面经过构建流程去掉源码注释。",
+
+	KeyCheckPrivateKeyTitle: "泄露了私钥",
+	KeyCheckPrivateKeyDesc: "响应中出现了形如 PEM 私钥的内容。任何人取到该 URL，" +
+		"就等于掌握了这把密钥所保护的一切：TLS 会话、签名令牌，甚至另一套系统的访问权。",
+	KeyCheckPrivateKeyFix: "立即把该文件移出站点根目录，并轮换这把密钥——" +
+		"已经被对外提供的密钥必须视为已泄露。私钥材料不应放在服务器对外发布的任何目录里。",
+
+	KeyCheckInsecureTransportTitle: "密码输入框通过明文 HTTP 提供",
+	KeyCheckInsecureTransportDesc: "该页面包含密码输入框，却未经 TLS 提供。" +
+		"用户输入的内容以及随后的会话，都会经过路径上任何人都可以读取或篡改的通道。",
+	KeyCheckInsecureTransportFix: "应用只通过 HTTPS 提供服务，并将明文 HTTP 请求重定向过去。" +
+		"证书就位后补上 HSTS，让浏览器不再尝试明文连接。",
+
+	KeyCheckLibraryTitle: "加载了存在已知漏洞的前端库",
+	KeyCheckLibraryDesc: "页面加载的这个库，其版本存在已公开的漏洞。该库由发布页面的一方维护，" +
+		"但在升级之前，这个缺陷会出现在每一个加载它的页面上——包括那些没人想到要去测的页面，" +
+		"因为问题并不出在它们自己的代码里。",
+	KeyCheckLibraryFix: "把库升级到包含修复的版本，并像管理服务端依赖那样跟踪前端依赖，" +
+		"让版本成为构建过程控制的东西。从 CDN 加载并不会把维护责任转移给 CDN。",
+
 	KeyCheckSQLiErrorTitle: "SQL 注入（报错型）",
 	KeyCheckSQLiErrorDesc: "向该参数注入 SQL 语法后，数据库返回了语法错误。" +
 		"这说明参数值未经参数化就进入了 SQL 语句，攻击者可以读写、甚至删除该数据库账号能触及的一切数据。",
@@ -228,7 +266,83 @@ var chinese = map[Key]string{
 		"用（归属者, 对象 ID）联合查询，或在返回前校验归属。" +
 		"客户端传来的标识符永远不能当作授权凭据。",
 
-	KeyEvidenceIDOR:    "两个认证会话读到了同一个对象（响应有 %s 与 %s 一致），而匿名请求读不到",
+	KeyCheckAccessVariantsTitle: "换一种方法或路径写法即可绕过访问控制",
+	KeyCheckAccessVariantsDesc: "原始请求被拒绝了，但把同一个资源换一种方式寻址——换方法，" +
+		"或同一路径换一种写法——就得到了响应。规则由某一层按某一种写法执行，" +
+		"而真正提供资源的是另一层，于是这个拒绝只对被测的那种请求成立，对没被测的那种不成立。",
+	KeyCheckAccessVariantsFix: "把规则下沉到真正提供资源的那一层，并覆盖所有写法：" +
+		"在任何规则生效之前先对路径做一次规范化，并且按“动作”而非“承载动作的方法”做授权。",
+
+	KeyEvidenceIDOR:       "两个认证会话读到了同一个对象（响应有 %s 与 %s 一致），而匿名请求读不到",
+	KeyEvidenceAccessRule: "原始请求被以 %d 拒绝，而变体 %q 被以 %d 应答",
+
+	KeyCheckPaginationTitle: "分页参数没有真正限制返回量",
+	KeyCheckPaginationDesc: "先把请求限定为只取一条，再换成一个超出该参数预期范围的取值，" +
+		"返回的数据量发生了明显变化。这个参数被当作“建议”而非限制来读，" +
+		"调用方因此可以一次取走整个集合——本来应该分页的接口就这样变成了批量导出。",
+	KeyCheckPaginationFix: "在服务端把分页大小夹到一个有上限的范围内，" +
+		"对越界取值直接拒绝而不是自行解释。并且在序列化之前就按调用方身份对集合做鉴权，" +
+		"不要让“返回多少条”成为用户和他人数据之间唯一的屏障。",
+
+	KeyEvidencePagination: "限定为 %d 条时响应为 %d 字节，而取值为 %q 时返回了 %d 字节",
+
+	KeyCheckTypeBypassTitle: "换一种参数写法即可绕过输入校验",
+	KeyCheckTypeBypassDesc: "同一个取值，单独提交时被拒绝，把参数写成数组形式后却被接受了。" +
+		"这段校验是按标量写的，而框架交给处理逻辑的是别的东西，" +
+		"于是校验根本看不到它本该拒绝的内容——相当一部分越权问题就是这条路径。",
+	KeyCheckTypeBypassFix: "按框架实际交付的类型做校验，而不是先看值；" +
+		"对形态不对的参数直接拒绝，不要做隐式转换。" +
+		"鉴权要基于解析后的取值，而不是原始字符串。",
+
+	KeyEvidenceTypeBypass: "取值 %q 被以 %d 拒绝，而同样取值写成 %q 后被以 %d 应答",
+
+	KeyCheckDOMXSSTitle: "页面自身脚本导致的跨站脚本",
+	KeyCheckDOMXSSDesc: "页面从 URL 里取了一个值，并把它当成标记写进了文档，浏览器执行时把它运行了。" +
+		"服务端根本没有看到这个 payload——值来自地址栏——所以任何服务端侧过滤都无从拦截，" +
+		"响应体里也看不出这个缺陷。",
+	KeyCheckDOMXSSFix: "用文本而不是标记来构建 DOM：用 textContent 而不是 innerHTML，" +
+		"通过创建元素并设置属性来代替拼接字符串；把来自 location、postMessage 或存储的值" +
+		"一律当作不可信输入。不带 unsafe-inline 的 Content-Security-Policy 是兜底，不是修复。",
+
+	KeyCheckLDAPTitle: "LDAP 注入",
+	KeyCheckLDAPDesc: "一个携带 LDAP 过滤语法的值到达了目录查询：响应里出现了目录库自己对畸形过滤器的报错。" +
+		"过滤器本身就是一门查询语言，拼进去的值不再是一个值，而是一个语项——" +
+		"本该询问「是否存在匹配条目」的认证检查，就此变成了「这个过滤器能否解析」。",
+	KeyCheckLDAPFix: "把值作为过滤器参数传入，而不是用它拼出过滤器；" +
+		"或者在拼接之前转义 LDAP 中有特殊含义的字符：* ( ) \\ NUL。" +
+		"先解析出用户，再比对凭据，不要让目录一次性同时匹配两者。",
+
+	KeyCheckXPathTitle: "XPath 注入",
+	KeyCheckXPathDesc: "一个携带 XPath 语法的值到达了 XPath 表达式：响应里出现了解析器自己的报错。" +
+		"XPath 没有参数绑定机制，值只能靠引号放进表达式里，而值自带的引号就足以闭合作者打开的那个字面量。",
+	KeyCheckXPathFix: "使用 XPath API 的变量绑定（带 resolver 编译出来的表达式），不要用字符串拼表达式；" +
+		"或者在使用前按严格白名单校验取值。转义只是退路，不是修复方案。",
+
+	KeyCheckODataTitle: "OData 查询注入",
+	KeyCheckODataDesc: "一个携带 OData 查询语法的值到达了服务端查询：响应里出现了库自己对畸形查询的报错。" +
+		"系统查询选项——$filter、$orderby、$expand——是写在 URL 里的查询语言，" +
+		"拼进去的值可以闭合它本该只是其中一个语项的那个表达式。",
+	KeyCheckODataFix: "用库的类型化 API 构造查询，而不是把取值拼进去；" +
+		"当某处期望的是字面量时，拒绝携带查询语法的值。",
+
+	KeyCheckGraphQLTitle: "GraphQL 内省泄露了 schema",
+	KeyCheckGraphQLDesc: "该端点会响应 schema 查询，任何人都能读到完整的类型系统：" +
+		"每一个 query、mutation 与字段，包括没有客户端在调用的，以及本就不打算公开的。" +
+		"这等于把攻击者本来要自己画的那张地图直接交给他。",
+	KeyCheckGraphQLFix: "在生产环境关闭内省；工具确实需要时，也只对已认证的开发者开放。" +
+		"再加一层查询白名单，让 schema 即便泄露也换不来一组可执行的操作。",
+
+	KeyEvidenceParser: "响应中出现了 %q，只有 %s 在收到无法解析的输入时才会产生它",
+
+	KeyCheckCachePoisonTitle: "缓存响应被请求头污染",
+	KeyCheckCachePoisonDesc: "一个写在请求头里的值出现在了响应中，随后在一个根本没有发送该头的请求里又出现了一次。" +
+		"第二个响应来自缓存：这个值被写进了页面的共享副本，缓存把这份副本发给谁，谁就会收到它。" +
+		"它会造成什么后果取决于页面把它放在哪里——链接、脚本、跳转——而全程都不需要受害者发送任何东西。",
+	KeyCheckCachePoisonFix: "把所有会进入响应的请求头都纳入缓存键，或者在边缘直接丢弃应用用不到的那些。" +
+		"不要用请求头拼 URL 或链接：从配置里取，或把该头校验在你可控的主机白名单内。" +
+		"对这类响应回 Cache-Control: private 或 no-store 是兜底，不是修复方案。",
+
+	KeyEvidenceCache:   "携带 %s 的请求返回了该值，而去掉它之后同样的请求随即拿到了那份缓存副本",
 	KeyEvidenceVariant: "payload 变形：%s（第 %d 代，变形链：%s）",
 	KeyEvidenceWAF:     "目标位于 %s 之后；payload 已升级到第 %d 代变形",
 
@@ -331,13 +445,32 @@ var chinese = map[Key]string{
 	KeyMsgTemplateUnsupported: "模板 %s 使用了 crackweb 无法执行的功能，已跳过：%s",
 	KeyMsgNoBrowser:           "未找到基于 Chromium 的浏览器，headless 爬虫不可用，将退回 HTTP 引擎。请安装 Chrome、Chromium 或 Edge，或用 CRACKWEB_CHROME 指定浏览器路径，也可显式使用 --engine http 以不再提示。",
 
-	KeyErrBadSensitivity: "灵敏度必须在 1 到 5 之间",
-	KeyErrNoChecks:       "所请求的检测项都不存在；用 --list-checks 查看可用项",
-	KeyErrLoadCA:         "无法载入或创建 CA：%v",
-	KeyErrReadRaw:        "无法读取 %s：%v",
-	KeyErrStartProxy:     "无法启动代理：%v",
-	KeyFlagNoWAF:         "关闭 WAF 探测与 payload 变形，按原样发送每个 payload。",
-	KeyCheckXXETitle:     "XML 外部实体注入",
+	KeyErrBadSensitivity:      "灵敏度必须在 1 到 5 之间",
+	KeyErrNoChecks:            "所请求的检测项都不存在；用 --list-checks 查看可用项",
+	KeyErrLoadCA:              "无法载入或创建 CA：%v",
+	KeyErrReadRaw:             "无法读取 %s：%v",
+	KeyErrStartProxy:          "无法启动代理：%v",
+	KeyReportBoundaryTitle:    "覆盖边界",
+	KeyReportUnanswered:       "没有得到响应的请求数：%d",
+	KeyReportProtectedTitle:   "有东西代替应用作答的主机：",
+	KeyReportProtectedNothing: "本次运行中没有任何请求被拒绝。",
+
+	KeyMsgUnanswered:          "%d 个请求没有得到响应",
+	KeyMsgProtectedHost:       "%s 前有东西代替应用作答",
+	KeyMsgProtectedWithVendor: "%s 前有东西代替应用作答（%s）",
+	KeyMsgChecksOptIn:         "需显式开启",
+	KeyMsgProbing:             "正在向各主机询问 API 描述、robots.txt 与 sitemap",
+	KeyMsgSelfDescribed:       "读到了 %d 份描述与 %d 个站点文件",
+
+	KeyFlagNoDiscovery: "不去询问 API 描述、robots.txt 或 sitemap；只测爬取能到达的内容。",
+	KeyFlagNoAssumeWAF: "保留 WAF 探测，只去掉「前面有防护」这个假定：" +
+		"只有在确实探测到拒绝时，才发送额外的代数。默认情况下无论有没有证据都会发，" +
+		"因为现代边缘常常改写 payload 却回 200，而不是拒绝它，检测因此无从看见。" +
+		"适用于你已经知道前面什么都没有的目标。",
+	KeyFlagNoWAF: "连 WAF 探测一起关掉。不再寻找厂商指纹，于是用自己方式拒绝的防护" +
+		"不会被认出，它的 payload 也就永远不会被变异。--no-assume-waf 保留探测、只去掉假定；" +
+		"这个是把两者都去掉。明说拒绝的响应在两种情况下都仍会被识别。",
+	KeyCheckXXETitle: "XML 外部实体注入",
 	KeyCheckXXEDesc: "XML 解析器解析了请求中声明的外部实体。" +
 		"只要开启了实体解析，解析器就会去抓取调用方指定的 URL，" +
 		"于是上传一份文档就变成了读取本地文件、或访问防火墙后服务的手段。",
@@ -387,8 +520,9 @@ var chinese = map[Key]string{
 		"这正是这类漏洞能躲过“一次只检查一个请求”的测试的原因。",
 	KeyCheckSecondOrderFix: "把存储数据在**读取时**也当作不可信输入，而不只是在写入时校验：" +
 		"消费它的查询要参数化，出口同样需要校验。",
-	KeyFlagUnsafeChecks: "额外运行那些「探测会影响目标、不止影响当次请求」的检测项（请求走私）。" +
-		"请仅对自己拥有的系统使用。",
+	KeyFlagUnsafeChecks: "额外运行 --list-checks 中标为「需显式开启」的检测项。它们的探测不只是发一个请求：" +
+		"走私探测会在连接上留下字节供下一个请求读取，DOM 探测会执行页面携带的每一个脚本，" +
+		"缓存探测会写入共享缓存。请仅对自己拥有的系统使用。",
 	KeyMsgUnsafeChecks:          "正在运行有副作用的检测项：%s",
 	KeyCheckMethodOverrideTitle: "服务端接受 HTTP 方法覆盖",
 	KeyCheckMethodOverrideDesc: "应用接受了一个请求：它的真实方法是无害的，" +
@@ -419,8 +553,22 @@ var chinese = map[Key]string{
 	KeyCheckCleartextPasswordFix: "让整个应用走 HTTPS，并把 http:// 重定向过去，" +
 		"同时启用 HSTS 以免重定向被剥离。" +
 		"在此之前，任何以这种方式提交过的凭据都应视为已泄露。",
-	KeyFlagCookie:    "随每个请求发送的会话 Cookie，例如 session=abc; csrf=xyz。可重复；多写一个前导的 Cookie: 也能识别。",
-	KeyFlagHeader:    "随每个请求发送的额外请求头，格式为 名称: 值。可重复 —— 用于 Bearer token、API key 等。",
-	KeyFlagBasicAuth: "HTTP Basic 凭据，格式 user:password，会以 Authorization 头发送。",
-	KeyFlagRandomUA:  "为每个请求现编一个合理的 User-Agent，而不是以 crackweb 标识自身。适合两种情况：工具自己的名字会污染你要看的日志，或者不想让扫描流量因固定指纹而被归组。",
+	KeyFlagCookie:            "随每个请求发送的会话 Cookie，例如 session=abc; csrf=xyz。可重复；多写一个前导的 Cookie: 也能识别。",
+	KeyFlagHeader:            "随每个请求发送的额外请求头，格式为 名称: 值。可重复 —— 用于 Bearer token、API key 等。",
+	KeyFlagBasicAuth:         "HTTP Basic 凭据，格式 user:password，会以 Authorization 头发送。",
+	KeyFlagRandomUA:          "为每个请求现编一个合理的 User-Agent，而不是以 crackweb 标识自身。适合两种情况：工具自己的名字会污染你要看的日志，或者不想让扫描流量因固定指纹而被归组。",
+	KeyCheckSQLiOrderByTitle: "SQL 注入（ORDER BY / LIMIT）",
+	KeyCheckSQLiOrderByDesc: "用于指定排序列或行数上限的参数被拼进了查询。" +
+		"这个位置无法用别处那套办法修 —— 列名没法参数化 —— " +
+		"所以即使框架把其他所有输入都参数化了，这个洞依然在；" +
+		"也正因如此，其他的 SQL 检测看不到它：这个子句不接受带引号的字符串，也无法用 UNION 续接。",
+	KeyCheckSQLiOrderByFix: "把调用方的取值映射到一份固定的允许列名清单，而不是直接透传。" +
+		"行数上限则绑定为整数。",
+	KeyCheckXSSStoredTitle: "存储型 XSS",
+	KeyCheckXSSStoredDesc: "提交给应用的值被保存下来，之后又作为标记语言返回给访问者，" +
+		"于是脚本在对方的浏览器里执行。与反射型不同，这个 payload 会持久存在：" +
+		"每个打开该页面的访客都会中招，不需要诱导他们点击任何东西。",
+	KeyCheckXSSStoredFix: "在**输出**时编码，而不仅仅在输入时 —— " +
+		"值可能是从一条路径写入、由另一条路径渲染的。" +
+		"使用默认转义的模板引擎；确需富文本时，按公开的白名单做净化。",
 }

@@ -81,11 +81,11 @@ func TestBodyParamsOnlyForFormEncoding(t *testing.T) {
 			want: 1,
 		},
 		{
-			name: "json body is not treated as form parameters",
+			name: "json body yields json fields, not form parameters",
 			raw: "POST /api HTTP/1.1\r\nHost: example.com\r\n" +
 				"Content-Type: application/json\r\n\r\n" +
 				`{"user":"admin","pass":"s3cret"}`,
-			want: 0,
+			want: 2,
 		},
 		{
 			name: "missing content type is not guessed at",

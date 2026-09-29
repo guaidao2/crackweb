@@ -130,7 +130,7 @@ crackweb oob --domain oob.example.com      # or standalone, on a host targets ca
 
 | Check | Finds |
 | --- | --- |
-| `passive-security-headers` | Missing CSP, HSTS, X-Content-Type-Options, X-Frame-Options, Referrer-Policy |
+| `passive-security-headers` | Missing CSP, HSTS, X-Content-Type-Options, X-Frame-Options, Referrer-Policy, Permissions-Policy |
 | `passive-cookie-flags` | Cookies without Secure, HttpOnly or SameSite |
 | `passive-cors` | Reflected or wildcard `Access-Control-Allow-Origin`, with credentials |
 | `passive-info-disclosure` | `Server`, `X-Powered-By` and friends leaking versions |
@@ -138,6 +138,12 @@ crackweb oob --domain oob.example.com      # or standalone, on a host targets ca
 | `passive-cache-control` | Session-establishing responses that may be cached |
 | `passive-directory-listing` | Auto-generated directory indexes |
 | `passive-cleartext-password` | Credentials submitted over http:// — the value is never reproduced in the report |
+| `passive-sri` | Scripts and stylesheets from another origin without a Subresource Integrity hash |
+| `passive-error-disclosure` | Stack traces and framework error messages in a response body |
+| `passive-content-disclosure` | Internal IP addresses, server-side paths and mailboxes in a response body |
+| `passive-private-key` | A PEM private key served over HTTP — the key is never reproduced in the report |
+| `passive-insecure-transport` | A password field served over plain HTTP |
+| `passive-vulnerable-library` | A front-end library at a version with a published vulnerability, named with its advisory |
 
 **Active** — send payloads and reason about what comes back.
 
@@ -148,6 +154,8 @@ crackweb oob --domain oob.example.com      # or standalone, on a host targets ca
 | `sqli-union` | Critical |
 | `sqli-time` | High |
 | `xss-reflected` | High |
+| `xss-stored` | High |
+| `sqli-order-by` | High |
 | `path-traversal` | High |
 | `ssti` | High |
 | `ssrf` | High |
@@ -164,6 +172,15 @@ crackweb oob --domain oob.example.com      # or standalone, on a host targets ca
 | `host-header` | Medium |
 | `method-override` | Medium |
 | `idor` | High *(needs two sessions)* |
+| `access-control-variants` | High *(runs on a 401/403)* |
+| `pagination-bypass` | Medium |
+| `parameter-type-bypass` | Medium |
+| `dom-xss` | High *(opt-in: runs the page in a browser)* |
+| `ldap-injection` | High |
+| `xpath-injection` | High |
+| `odata-injection` | High |
+| `graphql-introspection` | Low |
+| `cache-poisoning` | High *(opt-in: writes into a shared cache)* |
 | `request-smuggling` | High *(opt-in)* |
 
 Select checks by name or by tag: `--checks sqli`, `--checks injection`, `--checks all`.
@@ -202,6 +219,16 @@ crackweb scan -u https://staging.example.com --enable-unsafe-checks --checks all
 
 Either way it announces itself before sending anything.
 
+`dom-xss` is opt-in for a different reason. It loads the page in a real browser, and a
+browser runs every script the page carries — the ones that fetch further data and the ones
+that write it included. On a target whose pages have side effects, that is more than
+testing the request it was given. Naming it, or passing `--enable-unsafe-checks`, is the
+consent; without a browser installed the check reports nothing rather than guessing.
+
+```sh
+crackweb scan -u https://app.example.com/page --checks dom-xss
+```
+
 ## WAF evasion
 
 A scanner that ships fixed payloads — `' OR 1=1--`, `<script>alert(1)</script>` —
@@ -222,6 +249,20 @@ the next one run — and when a generation gets through, that fact is remembered
 per host, so later payloads start where the last one succeeded instead of
 rediscovering the firewall from scratch.
 
+That rule reads a refusal, and a modern edge frequently does not give one: it rewrites
+the payload and answers `200`, leaving nothing in the response that says it filtered
+anything. Against such a target the rule never fires — the evidence it acts on is exactly
+what is withheld — and the mutations, which are the part that gets through, would never be
+sent.
+
+So crackweb does not wait for the evidence. **It assumes a firewall is there**, and sends
+the first two generations of every payload whether or not anything was refused. Two, and not
+one, because the first generation spends its budget on structural rewrites; the combination
+that defeats a firewall which normalises once and matches once — a rewrite wrapped in an
+encoding — is reached in the second. The cost is real: on an unprotected target the request
+count goes up about fourfold. `--no-assume-waf` keeps the detection and drops the
+assumption, for a target you already know has nothing in front of it.
+
 Two rules keep the variants meaningful. Mutators in the same family never
 combine (three different ways to hide a space produce a payload that is none of
 them), and encoding is applied exactly once — a variant whose last transformation
@@ -235,7 +276,7 @@ Sucuri, 安全狗, 宝塔, 长亭雷池, …). "The response changed" is not eno
 verdict would escalate every later payload through extra generations for nothing.
 
 ```sh
-crackweb scan -u https://example.com --no-waf    # turn detection and mutation off
+crackweb scan -u https://example.com --no-waf    # also stop looking for a vendor fingerprint
 ```
 
 ## Advanced techniques
@@ -251,6 +292,7 @@ from a fuzzer:
 | **Path normalisation** | `//etc/passwd`, `/.//etc/passwd`, `/etc//passwd` — for implementations that strip `../` correctly and still collapse `//` wrongly. |
 | **Second-order injection** | A payload is written through one request and the *already-observed* pages are replayed to see whether reading it back broke something. Compared against what those pages returned **before** the write, so the evidence is the change the write caused. |
 | **Blind testing by callback** | A blind SSRF, command injection or XXE leaves nothing in the response. Each attempt plants a unique callback address and the proof arrives later, on a separate listener. |
+| **Encoded parameter documents** | A parameter whose value is a JSON document — base64-wrapped or not — is opened, and its fields are tested one by one. The envelope is rebuilt around every mutation, so a payload inside the document still reaches the application as valid input instead of breaking the parameter it arrived in. |
 
 ## Authenticated scanning
 
@@ -356,6 +398,11 @@ one collapsible card per finding with the description, the fix, the matched evid
 raw request, the response, the baseline it was compared against, and a ready-to-paste
 `curl` command. It respects the reader's light or dark preference and prints cleanly.
 
+Reports also carry the **coverage boundary**: how many requests never came back, and which
+hosts had something answering in front of the application. A refusal and a clean result look
+the same from the outside, so the report says which one it was rather than leaving the reader
+to guess.
+
 SARIF output plugs straight into GitHub code scanning.
 
 ## Performance
@@ -396,6 +443,38 @@ locations each platform actually installs to (including Edge, which every Window
 has), then the browser caches left by Playwright and Puppeteer. If none is found it says
 so once and continues with the HTTP engine, which needs no browser — so `--engine hybrid`
 on a machine without Chromium still crawls, just less deeply into JavaScript.
+
+**The browser's own requests are replayed as they were sent.** The crawler's rule is that
+the HTTP engine makes every request the scanner sees, so one code path produces them all. A
+request carrying a body is the exception that rule cannot cover: the page's script chose
+the method, the bytes and the content type, and none of that can be reconstructed from the
+address it went to. Fetching that address as a GET would miss the endpoint entirely — which
+is how a JSON API the browser talked to all along ends up untested. So those requests go
+back out exactly as they went, and a page that posts JSON is scanned like any other. A
+bodyless POST is left alone: there is no parameter to test, and sending it again does have
+an effect.
+
+**A published API description is read.** An OpenAPI or Swagger document is the best input a
+scan can be handed — every path, every method, and the parameters of each one — and most of
+what it lists is unreachable by following links, because nothing links to an API. crackweb
+asks the addresses such a document is commonly published at, follows the ones a page or a
+script points at (Swagger UI carries its own address in its initialiser), reads both
+generations of the format, and turns each operation into a request: path and query
+parameters get a value of their declared type, a request body is built from its schema, and
+the result goes to the scanner like any other request. A description is free to name any
+host; the scope is applied to what it names before anything is sent.
+
+**A site's robots file and sitemap are read too**, and for opposite reasons. A sitemap is a
+page list nobody had to crawl for, and it nests — an index points at further sitemaps, which
+are followed. A robots file lists what the site would rather nobody looked at, which is
+where the interesting addresses usually are: an entry there is a path somebody decided not
+to link to. Reading it is a deliberate choice rather than an oversight — the convention
+exists for search engines, which are trying not to be a nuisance, and a scan its operator
+authorised is asking a different question. The paths are fetched like any other address and
+reported as coming from there. Only entries that name a path are used: an empty value means
+everything is allowed, a bare `/` means nothing is, and a value with `*` or `$` in it is a
+pattern rather than an address. `--no-discovery` turns all of it off, for a target where
+even one address the user did not name is one too many.
 
 ## Project layout
 

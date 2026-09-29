@@ -63,7 +63,7 @@ var english = map[Key]string{
 	KeyFlagScanData:   "Request body; sending one turns the request into a form POST.",
 	KeyFlagScanHeader: "Extra request header, e.g. 'Cookie: a=b'; repeatable.",
 	KeyFlagRaw:        "Read the request to scan from a raw HTTP file, e.g. saved from Burp.",
-	KeyFlagChecks:     "Comma-separated check names, or 'all'.",
+	KeyFlagChecks:     "Comma-separated check names or tags, or 'all'. Checks marked opt-in in --list-checks are never pulled in by 'all'.",
 	KeyFlagScanOutput: "Report path; the format follows the extension (.html, .json, .sarif, .md).",
 
 	KeyFlagDNSAddr:   "Listen address for the DNS interaction server, e.g. 0.0.0.0:5353.",
@@ -164,6 +164,56 @@ var english = map[Key]string{
 	KeyCheckDirListingFix: "Disable automatic directory indexes (Options -Indexes in Apache, " +
 		"autoindex off in nginx) and remove files that should not be served.",
 
+	KeyCheckSRITitle: "Third-party subresources loaded without integrity checks",
+	KeyCheckSRIDesc: "A script or stylesheet is loaded from another origin without a " +
+		"Subresource Integrity hash. If that origin is compromised, or the file is replaced, " +
+		"the browser runs whatever it is served and the page has no way to notice.",
+	KeyCheckSRIFix: "Add an integrity attribute carrying a SHA-256 or stronger hash to every " +
+		"script and stylesheet loaded from another origin, and mark it crossorigin so the " +
+		"check is actually applied.",
+
+	KeyCheckErrorDisclosureTitle: "Application error details exposed",
+	KeyCheckErrorDisclosureDesc: "The response carries a stack trace or a framework error " +
+		"message. It names internal components, file paths and library versions, and it often " +
+		"shows exactly which input the application failed on.",
+	KeyCheckErrorDisclosureFix: "Handle errors at the edge of the application and return a " +
+		"generic message with a correlation id. Log the detail server-side, and turn framework " +
+		"debug modes off in production.",
+
+	KeyCheckContentDisclosureTitle: "Internal address, path or mailbox exposed",
+	KeyCheckContentDisclosureDesc: "The response body contains something that describes the " +
+		"deployment rather than the page: an internal IP address, a server-side file path or a " +
+		"mailbox address. None of it belongs in a public response, and together it is enough to " +
+		"aim an attack at the infrastructure behind the site.",
+	KeyCheckContentDisclosureFix: "Strip deployment detail from everything a visitor can " +
+		"read: customise error pages so they no longer print paths, and serve generated markup " +
+		"through a build step that removes source comments.",
+
+	KeyCheckPrivateKeyTitle: "Private key exposed",
+	KeyCheckPrivateKeyDesc: "The response contains what looks like a PEM private key. Whoever " +
+		"fetches this URL owns whatever the key protects: TLS sessions, signed tokens, or " +
+		"access to another system entirely.",
+	KeyCheckPrivateKeyFix: "Remove the file from the web root and rotate the key immediately — " +
+		"a key that has been served must be treated as compromised. Keep private material " +
+		"outside any directory the server publishes.",
+
+	KeyCheckInsecureTransportTitle: "Password field served over plain HTTP",
+	KeyCheckInsecureTransportDesc: "The page contains a password input and was served without " +
+		"TLS, so the credential and the session that follows it travel where anyone on the path " +
+		"can read or change them.",
+	KeyCheckInsecureTransportFix: "Serve the application over HTTPS only and redirect plain " +
+		"HTTP requests to it. Once the certificate is in place, send HSTS so the browser stops " +
+		"trying HTTP at all.",
+
+	KeyCheckLibraryTitle: "Front-end library with a known vulnerability",
+	KeyCheckLibraryDesc: "The page loads a copy of this library at a version that has a " +
+		"published vulnerability. The library is maintained by whoever ships the page, but " +
+		"until it is upgraded the flaw is present on every page that loads it — including the " +
+		"ones nobody thought to test, because the defect is not in their code.",
+	KeyCheckLibraryFix: "Upgrade the library to a release that carries the fix, and track " +
+		"front-end dependencies the way server-side ones are tracked, so the version is something " +
+		"the build controls. Loading it from a CDN does not move the maintenance to the CDN.",
+
 	KeyCheckSQLiErrorTitle: "SQL injection (error-based)",
 	KeyCheckSQLiErrorDesc: "Injecting SQL syntax into this parameter made the database report a " +
 		"syntax error. That means the value reaches a SQL statement without being parameterised, so " +
@@ -243,8 +293,115 @@ var english = map[Key]string{
 		"look the record up by owner and id together, or check ownership before returning it. A " +
 		"client-supplied identifier is never proof of authorisation.",
 
+	KeyCheckAccessVariantsTitle: "Access rule bypassed by a different method or path spelling",
+	KeyCheckAccessVariantsDesc: "The request was refused, but the same resource answered when it " +
+		"was addressed slightly differently — another method, or the same path spelled another " +
+		"way. The rule is enforced by one layer against one spelling while another layer serves " +
+		"the resource, so the refusal is real for the request that was tested and absent for the " +
+		"one that was not.",
+	KeyCheckAccessVariantsFix: "Enforce the rule where the resource is served rather than at the " +
+		"edge, and cover every spelling: normalise the path once, before any rule is evaluated, " +
+		"and authorise the action rather than the method that carried it.",
+
 	KeyEvidenceIDOR: "both authenticated sessions read the same object (%s of %s of the response " +
 		"matched) while an anonymous request did not",
+
+	KeyEvidenceAccessRule: "the original request was refused with %d, while the variant %q " +
+		"was answered with %d",
+
+	KeyCheckPaginationTitle: "Page size parameter does not bound the response",
+	KeyCheckPaginationDesc: "Bounding the request to a single record and then asking with a value " +
+		"outside the parameter's intended range changed how much came back, and by a lot. The " +
+		"parameter is being read as a hint rather than enforced as a limit, so a caller can ask " +
+		"for a whole collection in one response — which is how an endpoint that was meant to be " +
+		"paged turns into a bulk export.",
+	KeyCheckPaginationFix: "Clamp the page size server-side to a bounded maximum, and reject a " +
+		"value outside it rather than interpreting it. Authorise the caller against the " +
+		"collection before any of it is serialised, so the size of the response is never the " +
+		"thing standing between a user and other people's data.",
+
+	KeyEvidencePagination: "bounded to %d record(s) the response was %d bytes, while %q " +
+		"returned %d bytes",
+
+	KeyCheckTypeBypassTitle: "Input validation bypassed by wrapping the parameter",
+	KeyCheckTypeBypassDesc: "A value refused on its own was accepted once the same parameter " +
+		"was written in array form. The check on that value was written for a scalar while the " +
+		"framework hands the handler something else, so the validation never sees what it was " +
+		"meant to reject — the pattern behind a surprising share of authorization bypasses.",
+	KeyCheckTypeBypassFix: "Validate the type the framework actually delivers before looking at " +
+		"the value, and reject a parameter that arrives with the wrong shape rather than " +
+		"coercing it. Authorise against the resolved value, not against the raw string.",
+
+	KeyEvidenceTypeBypass: "the value %q was refused with %d, while the same value written as " +
+		"%q was answered with %d",
+
+	KeyCheckDOMXSSTitle: "Cross-site scripting through the page's own script",
+
+	KeyCheckDOMXSSDesc: "The page took a value from the URL and put it into the document as " +
+		"markup, and a browser running the page executed what was placed there. The server " +
+		"never saw the payload — the value came from the address bar — so nothing server-side " +
+		"could have filtered it, and no response body shows the flaw.",
+	KeyCheckDOMXSSFix: "Build the DOM with text rather than markup: use textContent instead of " +
+		"innerHTML, create elements and set attributes rather than assembling a string, and " +
+		"treat every value from location, a postMessage or storage as untrusted input. A " +
+		"Content-Security-Policy without unsafe-inline is the backstop, not the fix.",
+
+	KeyCheckLDAPTitle: "LDAP injection",
+	KeyCheckLDAPDesc: "A value carrying LDAP filter syntax reached a directory query: the " +
+		"response contains the directory library's own complaint about a malformed filter. A " +
+		"filter is a query language, so a value spliced into one stops being a value and " +
+		"becomes a term — which is how a check that asks whether any entry matches turns into a " +
+		"check that asks whether the filter parsed.",
+	KeyCheckLDAPFix: "Pass the value as a filter argument rather than building the filter out of " +
+		"it, or escape the characters LDAP gives meaning to — * ( ) \\ NUL — before it is used. " +
+		"Resolve the user first and compare the credential afterwards, instead of asking the " +
+		"directory to match both at once.",
+
+	KeyCheckXPathTitle: "XPath injection",
+	KeyCheckXPathDesc: "A value carrying XPath syntax reached an XPath expression: the response " +
+		"contains the parser's own complaint. XPath has no parameter binding, so a value can " +
+		"only be placed in an expression by quoting it — and a quote the value brings with it is " +
+		"enough to close the literal its author opened.",
+	KeyCheckXPathFix: "Use the XPath API's variable binding (an expression compiled with a " +
+		"resolver) instead of assembling the expression from strings, or validate the value " +
+		"against a strict allowlist first. Escaping is a fallback, not the fix.",
+
+	KeyCheckODataTitle: "OData query injection",
+	KeyCheckODataDesc: "A value carrying OData query syntax reached a service query: the response " +
+		"contains the library's own complaint about a malformed query. The system query options — " +
+		"$filter, $orderby, $expand — are a query language written into the URL, and a value " +
+		"spliced into one can close the expression it was meant to be a term in.",
+	KeyCheckODataFix: "Build the query through the library's typed API rather than concatenating " +
+		"the value into it, and reject a value that carries query syntax where a literal is " +
+		"expected.",
+
+	KeyCheckGraphQLTitle: "GraphQL schema exposed by introspection",
+	KeyCheckGraphQLDesc: "The endpoint answers a schema query, so anyone can read the whole type " +
+		"system: every query, mutation and field, including the ones no client calls and the ones " +
+		"that were never meant to be public. That is the map an attacker would otherwise have to " +
+		"draw by hand.",
+	KeyCheckGraphQLFix: "Turn introspection off in production, and keep it available only to " +
+		"authenticated developers if the tooling needs it. Add a query allowlist as well, so a " +
+		"schema that does leak still does not amount to a set of operations that can be run.",
+
+	KeyEvidenceParser: "the response carries %q, which only %s produces when it is handed input " +
+		"it cannot parse",
+
+	KeyCheckCachePoisonTitle: "Cached response poisoned through a request header",
+	KeyCheckCachePoisonDesc: "A value sent in a request header came back in the response, and " +
+		"then came back again for a request that never sent it. That second response was served " +
+		"from a cache: the value was written into a shared copy of the page, and every visitor " +
+		"the cache serves that copy to will receive it. What the value does there depends on " +
+		"where the page puts it — a link, a script, a redirect — and none of it requires the " +
+		"victim to send anything.",
+	KeyCheckCachePoisonFix: "Include every header that reaches the response in the cache key, " +
+		"or drop the ones the application does not need at the edge. Do not build URLs or links " +
+		"from a request header; derive them from configuration, or validate the header against " +
+		"an allowlist of hosts you control. Caches that honour Cache-Control: private or " +
+		"no-store on such responses are the backstop, not the fix.",
+
+	KeyEvidenceCache: "a request carrying %s returned the value, and the same request without " +
+		"it was then served the cached copy",
 
 	KeyFlagSession: "An authenticated session as a 'Name: value' header, e.g. 'Cookie: sess=abc'; " +
 		"repeat with at least two different sessions to enable the access-control check.",
@@ -348,15 +505,36 @@ var english = map[Key]string{
 	KeyMsgTemplateUnsupported: "template %s uses features crackweb cannot run and was skipped: %s",
 	KeyMsgNoBrowser:           "no Chromium-based browser found, so the headless crawler is unavailable; continuing with the HTTP engine. Install Chrome, Chromium or Edge, point CRACKWEB_CHROME at a browser binary, or choose --engine http to silence this.",
 
-	KeyErrBadSensitivity: "sensitivity must be between 1 and 5",
-	KeyErrNoChecks:       "none of the requested checks exist; use --list-checks to see them",
-	KeyErrLoadCA:         "could not load or create the CA: %v",
-	KeyErrReadRaw:        "could not read %s: %v",
-	KeyErrStartProxy:     "could not start the proxy: %v",
-	KeyEvidenceVariant:   "payload variant: %s (generation %d, transformations: %s)",
-	KeyEvidenceWAF:       "the target is behind %s; payloads were escalated through %d mutation generation(s)",
-	KeyFlagNoWAF:         "Disable WAF detection and payload mutation; send each payload as written.",
-	KeyCheckXXETitle:     "XML external entity injection",
+	KeyErrBadSensitivity:      "sensitivity must be between 1 and 5",
+	KeyErrNoChecks:            "none of the requested checks exist; use --list-checks to see them",
+	KeyErrLoadCA:              "could not load or create the CA: %v",
+	KeyErrReadRaw:             "could not read %s: %v",
+	KeyErrStartProxy:          "could not start the proxy: %v",
+	KeyEvidenceVariant:        "payload variant: %s (generation %d, transformations: %s)",
+	KeyEvidenceWAF:            "the target is behind %s; payloads were escalated through %d mutation generation(s)",
+	KeyReportBoundaryTitle:    "Coverage boundary",
+	KeyReportUnanswered:       "Requests that never produced a response: %d",
+	KeyReportProtectedTitle:   "Hosts where something answered for the application:",
+	KeyReportProtectedNothing: "Nothing refused a request on this run.",
+
+	KeyMsgUnanswered:          "%d request(s) never got a response",
+	KeyMsgProtectedHost:       "something answered for %s",
+	KeyMsgProtectedWithVendor: "something answered for %s (%s)",
+	KeyMsgChecksOptIn:         "opt-in",
+	KeyMsgProbing:             "asking each host for an API description, robots.txt and a sitemap",
+	KeyMsgSelfDescribed:       "read %d description(s) and %d site file(s)",
+
+	KeyFlagNoDiscovery: "Skip asking for an API description, robots.txt or a sitemap; test only what the crawl reaches.",
+	KeyFlagNoAssumeWAF: "Keep WAF detection, but drop the assumption that a firewall is there: " +
+		"the extra generations are sent only when a refusal was actually detected. By default they " +
+		"are sent regardless, because a modern edge often rewrites a payload and answers 200 rather " +
+		"than refusing it, which leaves detection nothing to see. Use this against a target you " +
+		"know has nothing in front of it.",
+	KeyFlagNoWAF: "Turn WAF detection off as well. No vendor fingerprint is looked for, so " +
+		"a firewall that refuses in its own way goes unrecognised and its payloads are never " +
+		"mutated. --no-assume-waf keeps the detection and drops only the assumption; this drops " +
+		"both. A plainly worded refusal is still acted on either way.",
+	KeyCheckXXETitle: "XML external entity injection",
 	KeyCheckXXEDesc: "The XML parser resolved an external entity declared in the request. " +
 		"A parser that has entity resolution enabled will fetch a URL the caller names, which turns " +
 		"a document upload into a way to read local files or reach services behind the firewall.",
@@ -411,8 +589,10 @@ var english = map[Key]string{
 	KeyCheckSecondOrderFix: "Treat stored data as untrusted when it is read, not just when it is " +
 		"written: parameterise the query that consumes it, and validate on the way out as well as " +
 		"on the way in.",
-	KeyFlagUnsafeChecks: "Also run checks whose probes can affect the target beyond the request " +
-		"they send (request smuggling). Use only against systems you own.",
+	KeyFlagUnsafeChecks: "Also run the checks marked opt-in by --list-checks. Their probes do " +
+		"more than send a request: a smuggling probe leaves bytes on the connection for the " +
+		"next request to read, a DOM check runs every script the page carries, and a cache " +
+		"probe writes into a shared cache. Use only against systems you own.",
 	KeyMsgUnsafeChecks:          "running checks with side effects: %s",
 	KeyCheckMethodOverrideTitle: "HTTP method override is honoured",
 	KeyCheckMethodOverrideDesc: "The application accepted a request whose real method is harmless " +
@@ -447,8 +627,24 @@ var english = map[Key]string{
 	KeyCheckCleartextPasswordFix: "Serve the whole application over HTTPS and redirect http:// to " +
 		"it, with HSTS so the redirect cannot be stripped. Until then, treat any credential " +
 		"submitted this way as compromised.",
-	KeyFlagCookie:    "Session cookie(s) sent with every request, e.g. session=abc; csrf=xyz. Repeatable; a leading Cookie: is tolerated.",
-	KeyFlagHeader:    "Extra header sent with every request, in Name: value form. Repeatable - use it for bearer tokens and API keys.",
-	KeyFlagBasicAuth: "HTTP Basic credentials as user:password; sent as an Authorization header.",
-	KeyFlagRandomUA:  "Compose a fresh, plausible User-Agent for every request instead of identifying as crackweb. Use it when the tool's own name would pollute a log you are reviewing, or to keep a scan from being grouped by fingerprint.",
+	KeyFlagCookie:            "Session cookie(s) sent with every request, e.g. session=abc; csrf=xyz. Repeatable; a leading Cookie: is tolerated.",
+	KeyFlagHeader:            "Extra header sent with every request, in Name: value form. Repeatable - use it for bearer tokens and API keys.",
+	KeyFlagBasicAuth:         "HTTP Basic credentials as user:password; sent as an Authorization header.",
+	KeyFlagRandomUA:          "Compose a fresh, plausible User-Agent for every request instead of identifying as crackweb. Use it when the tool's own name would pollute a log you are reviewing, or to keep a scan from being grouped by fingerprint.",
+	KeyCheckSQLiOrderByTitle: "SQL injection (ORDER BY / LIMIT)",
+	KeyCheckSQLiOrderByDesc: "A parameter that selects a sort column or a row limit was " +
+		"concatenated into the query. This position cannot be fixed the way the others can — a " +
+		"column name cannot be bound — which is why the flaw survives frameworks that " +
+		"parameterise everything else, and why the other SQL checks do not see it: the clause " +
+		"takes no quoted string and extends with no UNION.",
+	KeyCheckSQLiOrderByFix: "Map the caller's value onto a fixed list of allowed column names " +
+		"rather than passing it through. For a limit, bind an integer.",
+	KeyCheckXSSStoredTitle: "Stored cross-site scripting",
+	KeyCheckXSSStoredDesc: "A value submitted to the application was saved and later served back " +
+		"to a reader as markup, so the script runs in their browser. Unlike a reflected payload, " +
+		"this one persists: it executes for every visitor who loads the page, without them having " +
+		"to be lured into clicking anything.",
+	KeyCheckXSSStoredFix: "Encode on output, not only on input — the value may be written through " +
+		"one path and rendered by another. Use a templating engine that escapes by default, and " +
+		"where rich text is required, sanitise it against a published allow-list.",
 }

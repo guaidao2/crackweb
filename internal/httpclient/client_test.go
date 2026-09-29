@@ -411,3 +411,55 @@ func TestDefaultUserAgentCarriesTheVersion(t *testing.T) {
 		t.Errorf("DefaultUserAgent() = %q, want it to contain %q", DefaultUserAgent(), version.Version)
 	}
 }
+
+// TestPerRequestTimeoutOverridesTheClientDeadline is the fix for a silent loss:
+// a check that asks the server to wait needs more time than an ordinary request,
+// and http.Client.Timeout cannot be widened for one exchange. The deadline has
+// to come from the request.
+func TestPerRequestTimeoutOverridesTheClientDeadline(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(600 * time.Millisecond)
+		fmt.Fprint(w, "slow but fine")
+	}))
+	defer server.Close()
+
+	// The client's default is far too short for this handler.
+	client, err := New(Options{Timeout: 100 * time.Millisecond})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	if _, err := client.Do(context.Background(), request(t, "GET", server.URL+"/x", "")); err == nil {
+		t.Error("the client default was not applied")
+	}
+
+	slow := request(t, "GET", server.URL+"/x", "")
+	slow.Timeout = 5 * time.Second
+	resp, err := client.Do(context.Background(), slow)
+	if err != nil {
+		t.Fatalf("a request with its own deadline was cut off: %v", err)
+	}
+	if resp.Status != 200 {
+		t.Errorf("status = %d, want 200", resp.Status)
+	}
+}
+
+// TestPerRequestTimeoutStillFires: widening one request must not disable the
+// deadline altogether.
+func TestPerRequestTimeoutStillFires(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(2 * time.Second)
+		fmt.Fprint(w, "too slow")
+	}))
+	defer server.Close()
+
+	client, err := New(Options{Timeout: 30 * time.Second})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	req := request(t, "GET", server.URL+"/x", "")
+	req.Timeout = 200 * time.Millisecond
+	if _, err := client.Do(context.Background(), req); err == nil {
+		t.Error("a request's own deadline was not enforced")
+	}
+}

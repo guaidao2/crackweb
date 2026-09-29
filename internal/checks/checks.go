@@ -52,6 +52,20 @@ type OOBProvider interface {
 	Poll(token string) []Interaction
 }
 
+// Browser is a real browser, as a check sees it.
+//
+// A DOM cross-site scripting flaw exists only while a browser is running the page: the
+// server returns the same bytes whether the page is vulnerable or not, and what makes it
+// vulnerable is what the page's own script does with those bytes afterwards. Every other
+// check answers from a response; this one cannot. It is an interface for the same reason
+// the interaction server is: a caller without a browser passes nil, and checks that need
+// one skip themselves rather than guessing.
+type Browser interface {
+	// Probe loads a target in a browser and reports whether the page turned the markup the
+	// caller planted into part of its document, and what the browser made of it.
+	Probe(ctx context.Context, target, marker string) (embedded bool, detail string, err error)
+}
+
 // Interaction is one callback the out-of-band server observed.
 type Interaction struct {
 	// Protocol is "dns" or "http".

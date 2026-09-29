@@ -1,14 +1,17 @@
 package cli
 
 import (
+	"context"
 	"encoding/base64"
 	"errors"
 	"fmt"
 	"strings"
 	"time"
 
+	"github.com/guaidao2/crackweb/internal/browser"
 	"github.com/guaidao2/crackweb/internal/ca"
 	"github.com/guaidao2/crackweb/internal/checks"
+	"github.com/guaidao2/crackweb/internal/crawl"
 	// Importing the check packages for their side effect populates the
 	// registry; without these the scan would run zero checks.
 	_ "github.com/guaidao2/crackweb/internal/checks/active"
@@ -43,6 +46,7 @@ type requestOptions struct {
 	templates    *[]string
 	sessions     *[]string
 	noWAF        *bool
+	noAssumeWAF  *bool
 	unsafeChecks *bool
 	cookies      *[]string
 	headers      *[]string
@@ -66,6 +70,7 @@ func addRequestFlags(fs *FlagSet) *requestOptions {
 		templates:    fs.StringSlice("templates", "", "<dir>", i18n.KeyFlagTemplates),
 		sessions:     fs.StringSlice("session", "", "<header>", i18n.KeyFlagSession),
 		noWAF:        fs.Bool("no-waf", "", i18n.KeyFlagNoWAF),
+		noAssumeWAF:  fs.Bool("no-assume-waf", "", i18n.KeyFlagNoAssumeWAF),
 		cookies:      fs.StringSlice("cookie", "C", "<k=v; k2=v2>", i18n.KeyFlagCookie),
 		headers:      fs.StringSlice("header", "H", "<name: value>", i18n.KeyFlagHeader),
 		basicAuth:    fs.String("basic-auth", "", "", "<user:pass>", i18n.KeyFlagBasicAuth),
@@ -165,7 +170,7 @@ func (o *requestOptions) normalizer() (*diff.Normalizer, error) {
 // difference engine and the scanner that drives the checks. The HTTP client is
 // passed in so that the reference used to load templates and the one the checks
 // use are the same object, sharing its connection pool and rate limiter.
-func (o *requestOptions) scanContext(app *App, client *httpclient.Client, oobServer *oob.Server, selected []checks.Check, passiveOnly bool) (*checks.Context, *scan.Scanner, error) {
+func (o *requestOptions) scanContext(ctx context.Context, app *App, client *httpclient.Client, oobServer *oob.Server, selected []checks.Check, passiveOnly bool) (*checks.Context, *scan.Scanner, error) {
 	thresholds, err := o.thresholds()
 	if err != nil {
 		return nil, nil, &UsageError{msg: app.T(i18n.KeyErrBadSensitivity)}
@@ -183,9 +188,16 @@ func (o *requestOptions) scanContext(app *App, client *httpclient.Client, oobSer
 	engine := diff.NewEngine(thresholds, diff.DefaultKeywords())
 	checkCtx := checks.NewContext(client, app.Bundle, engine, normalizer)
 	checkCtx.OOB = provider
+	// A check that needs the page run in a browser is only a question away from one; the
+	// process itself starts on the first probe, so a scan that never asks pays nothing.
+	checkCtx.Browser = newBrowserProbe(ctx, app, selected)
 	// WAF handling is on by default: it costs one probe per host and is what
 	// makes the scanner work at all against a filtered target.
 	checkCtx.WAF = waf.NewState(!*o.noWAF)
+	// The mutations are the part that gets past a firewall, so they run whether or not one
+	// was recognised — see Context.AssumeWAF. --no-waf turns the whole thing off, and
+	// --no-assume-waf keeps the detection but drops the assumption.
+	checkCtx.AssumeWAF = !*o.noAssumeWAF && !*o.noWAF
 	checkCtx.Sessions = parseSessions(*o.sessions)
 
 	// The access-control check is meaningless with fewer than two identities;
@@ -214,6 +226,28 @@ func (o *requestOptions) scanContext(app *App, client *httpclient.Client, oobSer
 		},
 	}, checkCtx)
 	return checkCtx, scanner, nil
+}
+
+// newBrowserProbe returns the browser the DOM check will drive, or nil when the machine has
+// none. The check skips itself in that case, and a user who asked for it is told why: a
+// scan that silently dropped a check it was asked to run would look like a clean result.
+func newBrowserProbe(ctx context.Context, app *App, selected []checks.Check) checks.Browser {
+	wanted := false
+	for _, check := range selected {
+		if check.ID() == "dom-xss" {
+			wanted = true
+			break
+		}
+	}
+	if !wanted {
+		return nil
+	}
+	execPath := crawl.FindChromium()
+	if execPath == "" {
+		app.Warn(i18n.KeyMsgNoBrowser)
+		return nil
+	}
+	return browser.New(ctx, execPath, 0, 0)
 }
 
 // selectedChecks resolves the --checks flag and any --templates directories into
@@ -421,7 +455,7 @@ func truncateForDisplay(s string, max int) string {
 // writeReport renders a report for a finished run and tells the user where it
 // went. A failure to write is reported but not fatal: the findings were already
 // printed to the terminal, and losing the run over a bad path would be worse.
-func writeReport(app *App, path, target string, store *sitemap.Store, scanner *scan.Scanner) {
+func writeReport(app *App, path, target string, store *sitemap.Store, scanner *scan.Scanner, boundary report.Boundary) {
 	if path == "" {
 		return
 	}
@@ -449,6 +483,49 @@ func writeReport(app *App, path, target string, store *sitemap.Store, scanner *s
 	app.Note(i18n.KeyMsgReportWritten, path)
 }
 
+// scanBoundary describes what stood between the scan and the target.
+//
+// Both facts are already being collected — a request that never came back is counted, and a
+// firewall that answered is remembered with its vendor — and until now neither reached the
+// output. That is the failure this exists to prevent: a defended target and a clean one
+// produce the same report.
+func scanBoundary(stats scan.Stats, checkCtx *checks.Context) report.Boundary {
+	boundary := report.Boundary{Unanswered: stats.Failures}
+	if checkCtx == nil || checkCtx.WAF == nil {
+		return boundary
+	}
+	for _, summary := range checkCtx.WAF.Summaries() {
+		if summary.Vendor == "" {
+			// Probed and found to be unprotected: nothing to say.
+			continue
+		}
+		boundary.Protected = append(boundary.Protected, report.ProtectedHost{
+			Host:   summary.Host,
+			Vendor: summary.Vendor,
+		})
+	}
+	return boundary
+}
+
+// noteBoundary tells the user what stood between the scan and the target, on the terminal as
+// well as in the report. It goes after the verdict, because "nothing found" is exactly the
+// sentence a defended target also produces.
+func (a *App) noteBoundary(boundary report.Boundary) {
+	if a.Quiet {
+		return
+	}
+	if boundary.Unanswered > 0 {
+		a.Note(i18n.KeyMsgUnanswered, boundary.Unanswered)
+	}
+	for _, host := range boundary.Protected {
+		if host.Vendor != "" {
+			a.Note(i18n.KeyMsgProtectedWithVendor, host.Host, host.Vendor)
+			continue
+		}
+		a.Note(i18n.KeyMsgProtectedHost, host.Host)
+	}
+}
+
 // printChecks lists the available checks, grouped by kind.
 func (a *App) printChecks() {
 	a.Printf("%s:", a.T(i18n.KeyMsgChecksListed))
@@ -457,7 +534,14 @@ func (a *App) printChecks() {
 		if check.Passive() {
 			kind = "passive"
 		}
-		a.Printf("  %-28s %-8s %-9s %s", check.ID(), kind, check.Severity(),
+		// A check that is never selected by default has to say so here. This list is the
+		// only place inside the tool that names them, and a user reading it has no other way
+		// to learn one exists.
+		optIn := ""
+		if checks.IsUnsafe(check) {
+			optIn = "[" + a.T(i18n.KeyMsgChecksOptIn) + "]"
+		}
+		a.Printf("  %-28s %-8s %-9s %-16s %s", check.ID(), kind, check.Severity(), optIn,
 			strings.Join(check.Tags(), ","))
 	}
 }

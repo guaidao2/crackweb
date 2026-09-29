@@ -43,6 +43,15 @@ type Request struct {
 	Origin Origin
 	// CapturedAt is when the request was observed.
 	CapturedAt time.Time
+	// Timeout overrides the client's per-request deadline for this request
+	// alone. Zero means the client's value applies.
+	//
+	// It exists for the checks whose whole method is waiting: a time-based
+	// injection probe asks the server to pause for several seconds, and a
+	// deadline chosen for ordinary requests cuts it off before the answer
+	// arrives. Raising the client's timeout instead would slow every other
+	// request in the scan, so the budget belongs to the request that needs it.
+	Timeout time.Duration
 }
 
 // NewRequest builds a request from a method and an absolute URL.

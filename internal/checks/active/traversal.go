@@ -114,6 +114,13 @@ var sstiSeeds = []string{
 	"${{1999*1999}}",
 	"{{1999*'1999'}}",
 	"{{\"1999\"*1999}}",
+
+	// Some endpoints evaluate the parameter as an expression outright, with no
+	// delimiters around it — an expression language wired straight to a request
+	// field. Every seed above would be read as literal text by such a target, so
+	// the bare form is needed to reach it.
+	"1999*1999",
+	"1999*1999*1",
 }
 
 // ssti detects server-side template injection.

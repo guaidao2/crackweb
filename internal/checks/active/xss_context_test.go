@@ -52,11 +52,26 @@ func TestExecutableContext(t *testing.T) {
 			body: "<html><body>nothing here</body></html>",
 			want: false,
 		},
+		{
+			// A javascript: URL carries no markup characters, so in a text node
+			// it is inert — it only runs from a URL-bearing attribute.
+			name: "javascript url in body text",
+			body: "<html><body><p>Results for: javascript:alert(1)</p></body></html>",
+			want: false,
+		},
+		{
+			name: "javascript url in an href",
+			body: `<html><body><a href="javascript:alert(1)">click</a></body></html>`,
+			want: true,
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			marker := payload
-			if tc.name == "closing the attribute first" {
+			switch tc.name {
+			case "closing the attribute first":
 				marker = `"><script>alert(1)</script>`
+			case "javascript url in body text", "javascript url in an href":
+				marker = "javascript:alert(1)"
 			}
 			if got := executableContext(tc.body, marker); got != tc.want {
 				t.Errorf("executableContext(%s) = %v, want %v", tc.name, got, tc.want)

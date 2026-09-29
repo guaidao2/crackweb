@@ -43,6 +43,19 @@ type Context struct {
 	// checks, which is a supported configuration for environments with no
 	// external callbacks.
 	OOB OOBProvider
+	// Browser is the headless browser; nil disables the checks that need one to run the
+	// page, which is a supported configuration on a machine without a browser.
+	Browser Browser
+	// AssumeWAF sends each payload in its first mutated form as well, whether or not a
+	// firewall was detected.
+	//
+	// Detection works by recognising a refusal, and a modern edge frequently does not
+	// refuse: it rewrites the payload and answers 200, leaving nothing in the response that
+	// says it filtered anything. Against such a target the escalation rule never fires — the
+	// evidence that would have prompted it is precisely what is withheld — and the payload
+	// mutations, which are the part that gets through, are never sent. This is how a target
+	// that filters silently is asked the second question anyway.
+	AssumeWAF bool
 	// Engine judges whether a response differs from its baseline.
 	Engine *diff.Engine
 	// Normalizer prepares response bodies for comparison.
@@ -202,6 +215,18 @@ func (c *Context) Inject(ctx context.Context, t *Target, payload string) (*httpm
 // InjectEncoded is Inject with an explicit encoding, for checks that need to
 // control exactly what goes on the wire.
 func (c *Context) InjectEncoded(ctx context.Context, t *Target, payload string, enc Encoding) (*httpmsg.Request, *httpmsg.Response, error) {
+	return c.InjectEncodedTimed(ctx, t, payload, enc, 0)
+}
+
+// InjectEncodedTimed is InjectEncoded with a deadline for this request.
+//
+// A check whose method is to make the server wait needs one: the payload asks
+// for a pause of several seconds, and a deadline set for ordinary requests ends
+// the exchange before the answer arrives — which looks exactly like a target
+// that did not pause, so the finding is silently lost. The budget is passed per
+// call rather than set on the context because a target is shared by the checks
+// running concurrently against it.
+func (c *Context) InjectEncodedTimed(ctx context.Context, t *Target, payload string, enc Encoding, timeout time.Duration) (*httpmsg.Request, *httpmsg.Response, error) {
 	if t == nil || t.Request == nil || t.Param == nil {
 		return nil, nil, ErrNoParameter
 	}
@@ -209,6 +234,7 @@ func (c *Context) InjectEncoded(ctx context.Context, t *Target, payload string, 
 	if err != nil {
 		return nil, nil, err
 	}
+	mutated.Timeout = timeout
 	resp, err := c.Do(ctx, mutated)
 	return mutated, resp, err
 }
@@ -266,6 +292,32 @@ func Mutate(req *httpmsg.Request, param httpmsg.Param, payload string, enc Encod
 		return nil, errors.New("checks: cannot mutate a nil request")
 	}
 	out := req.Clone()
+
+	// A value that lives inside a document carried as another parameter's value is
+	// rebuilt together with its envelope, so the parameter still parses when the target
+	// reads it.
+	if param.Wrapper != httpmsg.WrapNone {
+		rewritten, ok := httpmsg.RewriteWrapped(out, param, payload)
+		if !ok {
+			return nil, errors.New("checks: cannot rewrite nested parameter " + param.Name)
+		}
+		return rewritten, nil
+	}
+
+	// A JSON document and a multipart part are written as they stand — neither is
+	// percent-encoded on the wire — so they rewrite their body directly instead of going
+	// through the transport encoding the caller asked for.
+	switch param.In {
+	case httpmsg.LocJSON, httpmsg.LocJSONBase64, httpmsg.LocMultipart, httpmsg.LocMultipartFilename:
+		updated, ok := httpmsg.RewriteBody(out.Body, out.Header.Get("Content-Type"), param, payload)
+		if !ok {
+			return nil, errors.New("checks: cannot rewrite " + string(param.In) + " parameter " + param.Name)
+		}
+		out.Body = updated
+		out.Header.Set("Content-Length", strconv.Itoa(len(updated)))
+		return out, nil
+	}
+
 	raw := encodeValue(payload, enc)
 
 	switch param.In {

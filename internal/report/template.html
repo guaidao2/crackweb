@@ -375,6 +375,12 @@
       <div><dt>{{.Labels.Endpoints}}</dt><dd>{{.Endpoints}}</dd></div>
       <div><dt>{{.Labels.Requests}}</dt><dd>{{.Requests}}</dd></div>
       {{if .Hosts}}<div><dt>{{.Labels.Hosts}}</dt><dd>{{.Hosts}}</dd></div>{{end}}
+      {{if .Boundary}}
+      <div>
+        <dt>{{.Labels.Boundary}}</dt>
+        <dd><ul class="boundary">{{range .Boundary}}<li>{{.}}</li>{{end}}</ul></dd>
+      </div>
+      {{end}}
     </dl>
   </section>
 
