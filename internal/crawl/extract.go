@@ -68,11 +68,15 @@ func (f Form) EncodeBody() string {
 		if field.Name == "" {
 			continue
 		}
-		// Checkboxes and radios are only submitted when checked; leaving them
-		// out entirely would produce a body the application rejects before it
-		// ever looks at our parameters.
-		switch strings.ToLower(field.Type) {
-		case "submit", "button", "image", "reset", "file":
+		// A file cannot go into a urlencoded body; an upload form is sent as multipart.
+		//
+		// Everything else is sent, including the submit button and unchecked boxes. A form
+		// the application never sees as submitted is not tested at all: `isset($_POST['submit'])`
+		// is how a great many PHP handlers decide whether to run, and an ASP.NET page wants its
+		// `__EVENTTARGET` alongside. Omitting the control the page uses to recognise its own
+		// submission turns the request into one the application ignores — which looks exactly
+		// like a target with no vulnerabilities.
+		if strings.EqualFold(field.Type, "file") {
 			continue
 		}
 		values.Add(field.Name, field.Value)
@@ -111,10 +115,9 @@ func (f Form) EncodeMultipart() ([]byte, string) {
 		if field.Name == "" {
 			continue
 		}
-		switch strings.ToLower(field.Type) {
-		case "submit", "button", "image", "reset":
-			continue
-		}
+		// Every control the form declares is sent, submit buttons and unchecked boxes
+		// included, for the reason EncodeBody gives: the application may decide whether the
+		// form was submitted at all from one of them.
 		body.WriteString("--" + boundary + "\r\n")
 		if strings.EqualFold(field.Type, "file") {
 			body.WriteString("Content-Disposition: form-data; name=\"" + field.Name +

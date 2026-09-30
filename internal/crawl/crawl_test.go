@@ -150,9 +150,10 @@ func TestParseExtractsForms(t *testing.T) {
 			t.Errorf("form body %q is missing %q", body, want)
 		}
 	}
-	// A submit button's name/value pair is not part of a scripted submission.
-	if strings.Contains(body, "go=") {
-		t.Errorf("form body %q includes the submit button", body)
+	// The submit button goes out with the rest: a handler that only runs when it is
+	// present would otherwise be sent a request that was never submitted.
+	if !strings.Contains(body, "go=") {
+		t.Errorf("form body %q dropped the submit button", body)
 	}
 
 	// A form with no action posts back to the page it is on.

@@ -110,12 +110,15 @@ func TestEncodeMultipartCarriesFieldsAndAFilePart(t *testing.T) {
 			t.Errorf("body is missing %q:\n%s", want, text)
 		}
 	}
-	if strings.Contains(text, `name="go"`) {
-		t.Errorf("submit control should not be submitted:\n%s", text)
+	// The submit button is submitted: a handler that runs only when it is present would
+	// otherwise see a request that was never submitted. It is addressable, so the scanner
+	// sees three fields, not two.
+	if !strings.Contains(text, `name="go"`) {
+		t.Errorf("submit control was dropped from the body:\n%s", text)
 	}
 
-	if got := scannerSees(t, body, contentType); got != 2 {
-		t.Errorf("scanner sees %d addressable fields, want 2 (the text field and the file name)", got)
+	if got := scannerSees(t, body, contentType); got != 3 {
+		t.Errorf("scanner sees %d addressable fields, want 3 (text, file and submit)", got)
 	}
 }
 
@@ -161,5 +164,52 @@ func TestFormRequestsBuildsWhatTheFormDeclares(t *testing.T) {
 	requests = FormRequests(empty, base)
 	if len(requests) != 1 || requests[0].URLString() != "http://target.example/account/login" {
 		t.Errorf("an empty action did not resolve to the page itself: %v", requests)
+	}
+}
+
+// TestEncodedFormKeepsTheControlsThePageUsesToRecogniseItself pins the fix that made
+// pikachu's forms testable at all: a body without the submit button is a request the
+// application ignores, because `isset($_POST['submit'])` is how a PHP handler decides
+// whether it was submitted. sqlmap keeps these controls for the same reason.
+func TestEncodedFormKeepsTheControlsThePageUsesToRecogniseItself(t *testing.T) {
+	form := Form{
+		Action: "/vul/sqli/x.php",
+		Method: "POST",
+		Fields: []Field{
+			{Name: "name", Value: "k", Type: "text"},
+			{Name: "submit", Value: "查询", Type: "submit"},
+			{Name: "remember", Value: "1", Type: "checkbox"},
+			{Name: "kind", Value: "x", Type: "radio"},
+			{Name: "hidden_token", Value: "t", Type: "hidden"},
+		},
+	}
+
+	body := form.EncodeBody()
+	for _, want := range []string{"name=k", "submit=", "remember=1", "kind=x", "hidden_token=t"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("urlencoded body %q is missing %q", body, want)
+		}
+	}
+
+	multipart, contentType := form.EncodeMultipart()
+	if !strings.Contains(contentType, "multipart/form-data") {
+		t.Errorf("content type = %q", contentType)
+	}
+	for _, want := range []string{`name="name"`, `name="submit"`, `name="remember"`, `name="kind"`, `name="hidden_token"`} {
+		if !strings.Contains(string(multipart), want) {
+			t.Errorf("multipart body is missing %s", want)
+		}
+	}
+}
+
+// TestUrlencodedFormStillLeavesOutFiles: a file part cannot go into a urlencoded body, and a
+// form carrying one is sent as multipart instead.
+func TestUrlencodedFormStillLeavesOutFiles(t *testing.T) {
+	form := Form{Fields: []Field{
+		{Name: "note", Value: "hi", Type: "text"},
+		{Name: "attachment", Value: "", Type: "file"},
+	}}
+	if body := form.EncodeBody(); strings.Contains(body, "attachment") {
+		t.Errorf("a file field reached a urlencoded body: %q", body)
 	}
 }
