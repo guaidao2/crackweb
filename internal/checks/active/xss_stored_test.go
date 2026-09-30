@@ -3,6 +3,7 @@ package active
 import (
 	"context"
 	"fmt"
+	"html/template"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -90,5 +91,67 @@ func TestXSSStoredIgnoresSafeMethods(t *testing.T) {
 	target := &checks.Target{Request: request, Response: baseline, Param: &params[0]}
 	if n := len((xssStored{}).Run(context.Background(), h.ctx, target)); n != 0 {
 		t.Error("a GET was treated as a write")
+	}
+}
+
+// TestXSSPathReflectionFiresOnUnescapedSegment: the route prints the name it was addressed by
+// into the page, which is a reflection the parameter walk cannot reach.
+func TestXSSPathReflectionFiresOnUnescapedSegment(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		segments := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
+		w.Header().Set("Content-Type", "text/html")
+		fmt.Fprintf(w, "<html><body><h1>Hello, %s!</h1></body></html>", segments[len(segments)-1])
+	}))
+	defer server.Close()
+
+	request, err := httpmsg.NewRequest("GET", server.URL+"/greet/world?ref=top")
+	if err != nil {
+		t.Fatalf("NewRequest: %v", err)
+	}
+	h := newHarness(t)
+	response, err := h.client.Do(context.Background(), request)
+	if err != nil {
+		t.Fatalf("baseline: %v", err)
+	}
+	params := request.Params()
+	target := &checks.Target{Request: request, Response: response, Param: &params[0]}
+
+	findings := runRequestLevel(t, h, xssReflected{}, target)
+	if len(findings) == 0 {
+		t.Fatal("a segment printed unescaped into the page was not reported")
+	}
+	if findings[0].CWE != "CWE-79" {
+		t.Errorf("CWE = %q, want CWE-79", findings[0].CWE)
+	}
+	if !strings.Contains(findings[0].Payload, "path segment") {
+		t.Errorf("payload = %q, want the payload to say where it was put", findings[0].Payload)
+	}
+}
+
+// TestXSSPathReflectionStaysQuietWhenTheSegmentIsEscaped is the line the judgement draws: the
+// value still comes back, and it is not executable.
+func TestXSSPathReflectionStaysQuietWhenTheSegmentIsEscaped(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		segments := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
+		w.Header().Set("Content-Type", "text/html")
+		fmt.Fprintf(w, "<html><body><h1>Hello, %s!</h1></body></html>",
+			template.HTMLEscapeString(segments[len(segments)-1]))
+	}))
+	defer server.Close()
+
+	request, err := httpmsg.NewRequest("GET", server.URL+"/greet/world?ref=top")
+	if err != nil {
+		t.Fatalf("NewRequest: %v", err)
+	}
+	h := newHarness(t)
+	response, err := h.client.Do(context.Background(), request)
+	if err != nil {
+		t.Fatalf("baseline: %v", err)
+	}
+	params := request.Params()
+	target := &checks.Target{Request: request, Response: response, Param: &params[0]}
+
+	if findings := runRequestLevel(t, h, xssReflected{}, target); len(findings) != 0 {
+		t.Errorf("an escaped segment was reported: %v", findings[0].Evidence.Matches)
 	}
 }

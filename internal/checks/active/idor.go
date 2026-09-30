@@ -40,7 +40,7 @@ func (accessControl) DescriptionKey() i18n.Key   { return i18n.KeyCheckIDORDesc 
 func (accessControl) RemediationKey() i18n.Key   { return i18n.KeyCheckIDORFix }
 func (accessControl) Severity() finding.Severity { return finding.SeverityHigh }
 func (accessControl) Tags() []string {
-	return []string{"active", "authorization", "idor", "owasp-top10"}
+	return []string{"active", "authorization", "access-control", "idor", "owasp-top10"}
 }
 func (accessControl) Passive() bool { return false }
 

@@ -33,6 +33,7 @@ func init() {
 	checks.Register(errorDisclosure{})
 	checks.Register(contentDisclosure{})
 	checks.Register(privateKey{})
+	checks.Register(cspWeaknesses{})
 	checks.Register(insecureTransport{})
 	checks.Register(vulnerableLibrary{})
 }
@@ -133,19 +134,8 @@ func (cookieFlags) Run(_ context.Context, _ *checks.Context, t *checks.Target) [
 		if name == "" {
 			continue
 		}
-		lower := strings.ToLower(attributes)
-
-		var missing []string
-		if !strings.Contains(lower, "; secure") {
-			missing = append(missing, "Secure")
-		}
-		if !strings.Contains(lower, "httponly") {
-			missing = append(missing, "HttpOnly")
-		}
-		if !strings.Contains(lower, "samesite") {
-			missing = append(missing, "SameSite")
-		}
-		if len(missing) == 0 {
+		problems := cookieProblems(name, cookieAttributes(attributes))
+		if len(problems) == 0 {
 			continue
 		}
 
@@ -154,11 +144,87 @@ func (cookieFlags) Run(_ context.Context, _ *checks.Context, t *checks.Target) [
 		f.Confidence = finding.ConfidenceCertain
 		f.DedupHostOnly = true
 		f.DedupExtra = name
-		f.Evidence.Matches = []string{name + ": " + strings.Join(missing, ", ")}
+		f.Evidence.Matches = problems
 		f.Evidence.Response = headBytes(t.Response, 4096)
 		findings = append(findings, f)
 	}
 	return findings
+}
+
+// cookieAttributeRe matches one attribute of a Set-Cookie header.
+//
+// Attributes are read as attributes rather than searched for as substrings: a cookie whose
+// *value* contains the word "httponly" is not an HttpOnly cookie, and `;Secure` written
+// without a space is still Secure.
+var cookieAttributeRe = regexp.MustCompile(`(?i)(?:^|;)\s*([a-z][a-z0-9-]*)(?:\s*=\s*([^;]*))?`)
+
+// cookieAttributes parses the attribute list of a Set-Cookie header, lower-casing the names.
+func cookieAttributes(attributes string) map[string]string {
+	out := map[string]string{}
+	for _, match := range cookieAttributeRe.FindAllStringSubmatch(attributes, 32) {
+		name := strings.ToLower(strings.TrimSpace(match[1]))
+		out[name] = strings.TrimSpace(match[2])
+	}
+	return out
+}
+
+// cookieProblems lists what is wrong with one cookie: the flags it is missing, and the
+// combinations a browser refuses.
+//
+// The second kind matters because it is invisible in a header somebody skimmed. A cookie
+// with `SameSite=None` and no `Secure` is not a weaker cookie, it is one browsers drop; a
+// `__Host-` name that also carries a Domain attribute is rejected for the same reason the
+// prefix exists. A page that relies on the cookie then simply does not have it — which is a
+// different problem from the one the missing flag suggests, and worth saying.
+func cookieProblems(name string, attrs map[string]string) []string {
+	_, secure := attrs["secure"]
+	_, httpOnly := attrs["httponly"]
+	sameSite, hasSameSite := attrs["samesite"]
+
+	var problems []string
+	if !secure {
+		problems = append(problems, name+": missing Secure")
+	}
+	if !httpOnly {
+		problems = append(problems, name+": missing HttpOnly")
+	}
+	if !hasSameSite {
+		problems = append(problems, name+": missing SameSite")
+	}
+
+	if hasSameSite {
+		switch strings.ToLower(sameSite) {
+		case "none":
+			if !secure {
+				problems = append(problems, name+
+					": SameSite=None without Secure, which browsers reject outright")
+			}
+		case "strict", "lax":
+		default:
+			problems = append(problems, name+": SameSite="+sameSite+
+				" is not one of Strict, Lax or None, so browsers fall back to their own default")
+		}
+	}
+
+	// The name prefixes are a contract, and violating it makes the cookie invalid rather
+	// than merely weaker.
+	switch {
+	case strings.HasPrefix(name, "__Host-"):
+		if !secure {
+			problems = append(problems, name+": the __Host- prefix requires Secure")
+		}
+		if _, hasDomain := attrs["domain"]; hasDomain {
+			problems = append(problems, name+": the __Host- prefix forbids a Domain attribute")
+		}
+		if path := attrs["path"]; path != "/" {
+			problems = append(problems, name+": the __Host- prefix requires Path=/")
+		}
+	case strings.HasPrefix(name, "__Secure-"):
+		if !secure {
+			problems = append(problems, name+": the __Secure- prefix requires Secure")
+		}
+	}
+	return problems
 }
 
 // parseSetCookie splits a Set-Cookie value into its name and its attribute list.
@@ -289,8 +355,29 @@ func (infoDisclosure) Run(_ context.Context, _ *checks.Context, t *checks.Target
 	return []*finding.Finding{f}
 }
 
-// mixedContentRe matches a subresource reference over plain HTTP.
-var mixedContentRe = regexp.MustCompile(`(?i)(?:src|href|action|data)\s*=\s*["'](http://[^"'\s>]+)`)
+// mixedContentPatterns pair the elements that can carry a plain-HTTP address with what
+// mixing them costs.
+//
+// The distinction is the browser's own: a script, an iframe, a stylesheet or a form target
+// has to be trusted — the bytes run, or they decide where the page goes — and a browser
+// blocks those rather than running them, so on a modern client the page is broken and on an
+// older or laxer one it is executing an attacker's code. An image or a media file is
+// tampered with rather than executed, which is a different claim and a different severity.
+var mixedContentPatterns = []struct {
+	element string
+	plain   string
+	active  bool
+	re      *regexp.Regexp
+}{
+	{"script", "script", true, regexp.MustCompile(`(?is)<script\b[^>]*\bsrc\s*=\s*["'](http://[^"'\s>]+)`)},
+	{"iframe", "iframe", true, regexp.MustCompile(`(?is)<iframe\b[^>]*\bsrc\s*=\s*["'](http://[^"'\s>]+)`)},
+	{"stylesheet", "stylesheet", true, regexp.MustCompile(`(?is)<link\b[^>]*\brel\s*=\s*["']?stylesheet[^>]*\bhref\s*=\s*["'](http://[^"'\s>]+)`)},
+	{"form action", "form", true, regexp.MustCompile(`(?is)<form\b[^>]*\baction\s*=\s*["'](http://[^"'\s>]+)`)},
+	{"embed", "embed", true, regexp.MustCompile(`(?is)<embed\b[^>]*\bsrc\s*=\s*["'](http://[^"'\s>]+)`)},
+	{"object data", "object", true, regexp.MustCompile(`(?is)<object\b[^>]*\bdata\s*=\s*["'](http://[^"'\s>]+)`)},
+	{"image", "image", false, regexp.MustCompile(`(?is)<img\b[^>]*\bsrc\s*=\s*["'](http://[^"'\s>]+)`)},
+	{"media", "media", false, regexp.MustCompile(`(?is)<(?:audio|video|source|track)\b[^>]*\bsrc\s*=\s*["'](http://[^"'\s>]+)`)},
+}
 
 // mixedContent reports plain-HTTP subresources on an HTTPS page.
 type mixedContent struct{}
@@ -307,33 +394,55 @@ func (mixedContent) Run(_ context.Context, _ *checks.Context, t *checks.Target) 
 		return nil
 	}
 
-	matches := mixedContentRe.FindAllStringSubmatch(string(t.Response.Body), 10)
-	if len(matches) == 0 {
-		return nil
-	}
-
+	body := bodyForScan(t.Response.Body)
 	seen := map[string]bool{}
-	var urls []string
-	for _, m := range matches {
-		if len(m) < 2 || seen[m[1]] {
-			continue
+	var active, passive []string
+	for _, pattern := range mixedContentPatterns {
+		for _, match := range pattern.re.FindAllStringSubmatch(body, 5) {
+			if len(match) < 2 || seen[match[1]] {
+				continue
+			}
+			seen[match[1]] = true
+			line := pattern.element + " loads " + match[1]
+			if pattern.active {
+				active = append(active, line)
+			} else {
+				passive = append(passive, line)
+			}
 		}
-		seen[m[1]] = true
-		urls = append(urls, m[1])
-		if len(urls) >= 5 {
-			break
-		}
+	}
+	if len(active) == 0 && len(passive) == 0 {
+		return nil
 	}
 
 	f := checks.NewFinding(mixedContent{}, t,
 		i18n.KeyCheckMixedContentTitle, i18n.KeyCheckMixedContentDesc, i18n.KeyCheckMixedContentFix)
+	// Active content is the stronger claim, and it decides the severity: a resource that
+	// runs is a different problem from one that is merely tampered with.
+	if len(active) > 0 {
+		f.Severity = finding.SeverityHigh
+		f.Evidence.Matches = append(active, passive...)
+		f.Evidence.Diff = "active mixed content: " + strings.Join(active, "; ")
+	} else {
+		f.Severity = finding.SeverityLow
+		f.Evidence.Matches = passive
+		f.Evidence.Diff = "passive mixed content only: " + strings.Join(passive, "; ")
+	}
 	f.Confidence = finding.ConfidenceCertain
-	f.Evidence.Matches = urls
 	f.Evidence.Response = headBytes(t.Response, 8192)
 	return []*finding.Finding{f}
 }
 
-// cacheControl reports authenticated responses that may be cached.
+// cacheControl reports a response that belongs to one user and may be stored by a cache
+// that serves everybody.
+//
+// Two things have to be true, and the second is the one worth being careful about. The
+// response has to belong to somebody — it sets a cookie, or it answers a request that
+// carried one, or an Authorization header. And a cache has to be told it may keep it: that
+// is what `public` and `s-maxage` say. Without one of those, a shared cache is not required
+// to store the response at all, and calling the absence of a prohibition a permission is how
+// this check would fill a report with static pages. A response that explicitly says `private`
+// or `no-store` is doing the right thing and is not reported.
 type cacheControl struct{}
 
 func (cacheControl) ID() string                 { return "passive-cache-control" }
@@ -345,25 +454,74 @@ func (cacheControl) Tags() []string {
 	return []string{"passive", "cookies", "session"}
 }
 func (cacheControl) Passive() bool { return true }
+
+// cacheSharingDirectives are the Cache-Control directives that tell a shared cache, in so
+// many words, that it may keep the response.
+var cacheSharingDirectives = []string{"public", "s-maxage"}
+
+// cacheDirectives splits a Cache-Control header into its directives, lower-cased.
+func cacheDirectives(header string) map[string]string {
+	out := map[string]string{}
+	for _, part := range strings.Split(header, ",") {
+		name, value, _ := strings.Cut(strings.TrimSpace(strings.ToLower(part)), "=")
+		if name != "" {
+			out[strings.TrimSpace(name)] = strings.TrimSpace(value)
+		}
+	}
+	return out
+}
+
 func (cacheControl) Run(_ context.Context, _ *checks.Context, t *checks.Target) []*finding.Finding {
-	if t.Response == nil {
+	if t.Response == nil || t.Request == nil {
 		return nil
 	}
-	// The signal is a response that both establishes a session and allows
-	// itself to be cached; anything else is ordinary static content.
-	if t.Response.Header.Get("Set-Cookie") == "" {
+	// Whose response is it? A session being established, a session being answered, or an
+	// authenticated request: any of the three makes the response one user's.
+	belongsToSomebody := t.Response.Header.Get("Set-Cookie") != "" ||
+		t.Request.Header.Get("Cookie") != "" || t.Request.Header.Get("Authorization") != ""
+	if !belongsToSomebody {
 		return nil
 	}
-	cacheControlHeader := strings.ToLower(t.Response.Header.Get("Cache-Control"))
-	if strings.Contains(cacheControlHeader, "no-store") || strings.Contains(cacheControlHeader, "private") {
+
+	directives := cacheDirectives(t.Response.Header.Get("Cache-Control"))
+	if _, private := directives["private"]; private {
 		return nil
+	}
+	if _, noStore := directives["no-store"]; noStore {
+		return nil
+	}
+
+	shareable := false
+	for _, name := range cacheSharingDirectives {
+		if _, ok := directives[name]; ok {
+			shareable = true
+			break
+		}
+	}
+
+	matches := []string{"Cache-Control: " + orNone(t.Response.Header.Get("Cache-Control"))}
+	confidence := finding.ConfidenceTentative
+	if shareable {
+		confidence = finding.ConfidenceFirm
+		matches = append(matches, "the response is marked shareable (`public` or `s-maxage`), so a "+
+			"cache that serves everybody is entitled to keep this user's response")
+		// `Vary` is what a cache uses to tell users apart. Without Cookie or Authorization
+		// in it, one user's response is a candidate for the next user's request.
+		vary := strings.ToLower(t.Response.Header.Get("Vary"))
+		if !strings.Contains(vary, "cookie") && !strings.Contains(vary, "authorization") && vary != "*" {
+			matches = append(matches, "Vary does not name Cookie or Authorization, so a shared "+
+				"cache has nothing to distinguish one user from another")
+		}
+	} else {
+		matches = append(matches, "nothing forbids a shared cache from storing it, and nothing "+
+			"tells one to keep it either")
 	}
 
 	f := checks.NewFinding(cacheControl{}, t,
 		i18n.KeyCheckCacheTitle, i18n.KeyCheckCacheDesc, i18n.KeyCheckCacheFix)
-	f.Confidence = finding.ConfidenceTentative
+	f.Confidence = confidence
 	f.DedupHostOnly = true
-	f.Evidence.Matches = []string{"Cache-Control: " + orNone(t.Response.Header.Get("Cache-Control"))}
+	f.Evidence.Matches = matches
 	f.Evidence.Response = headBytes(t.Response, 4096)
 	return []*finding.Finding{f}
 }
@@ -387,20 +545,52 @@ func (directoryListing) RemediationKey() i18n.Key   { return i18n.KeyCheckDirLis
 func (directoryListing) Severity() finding.Severity { return finding.SeverityMedium }
 func (directoryListing) Tags() []string             { return []string{"passive", "disclosure"} }
 func (directoryListing) Passive() bool              { return true }
+
+// directoryListingSensitive are the names whose presence turns an index from a list of what the
+// site serves into a list of what it should not have served: repository metadata, credential
+// files, database exports, editor backups. A reader who finds these can ask for the file itself,
+// and the file is the whole history or the whole database.
+var directoryListingSensitive = []string{
+	".git", ".svn", ".hg", ".env", ".htpasswd", ".ssh", "id_rsa", "id_dsa", "id_ecdsa",
+	"backup", "dump", "database", "export", ".sql", ".bak", ".old", ".orig", ".swp",
+	".zip", ".tar", ".tgz", ".gz", ".7z", ".rar",
+	"wp-config", "config.php", "settings.py", "application.properties", "credentials",
+	"users.csv", "passwords", ".pem", ".key", ".pfx", ".jks", ".keystore", "shadow",
+}
+
 func (directoryListing) Run(_ context.Context, _ *checks.Context, t *checks.Target) []*finding.Finding {
 	if t.Response == nil || t.Response.Status != 200 {
 		return nil
 	}
 	body := string(t.Response.Body)
 	for _, marker := range directoryListingMarkers {
-		if strings.Contains(body, marker) {
-			f := checks.NewFinding(directoryListing{}, t,
-				i18n.KeyCheckDirListingTitle, i18n.KeyCheckDirListingDesc, i18n.KeyCheckDirListingFix)
-			f.Confidence = finding.ConfidenceCertain
-			f.Evidence.Matches = []string{marker}
-			f.Evidence.Response = headBytes(t.Response, 4096)
-			return []*finding.Finding{f}
+		if !strings.Contains(body, marker) {
+			continue
 		}
+		f := checks.NewFinding(directoryListing{}, t,
+			i18n.KeyCheckDirListingTitle, i18n.KeyCheckDirListingDesc, i18n.KeyCheckDirListingFix)
+		f.Confidence = finding.ConfidenceCertain
+		matches := []string{marker}
+
+		// What the index happens to list is what decides how much this is worth: an index of
+		// images is a directory the site meant to serve, and an index of a database export is
+		// the database.
+		lower := strings.ToLower(body)
+		var sensitive []string
+		for _, name := range directoryListingSensitive {
+			if strings.Contains(lower, name) {
+				sensitive = append(sensitive, name)
+			}
+		}
+		if len(sensitive) > 0 {
+			f.Severity = finding.SeverityHigh
+			matches = append(matches,
+				"the index names "+strings.Join(sensitive, ", ")+
+					", so the file can be asked for directly")
+		}
+		f.Evidence.Matches = matches
+		f.Evidence.Response = headBytes(t.Response, 4096)
+		return []*finding.Finding{f}
 	}
 	return nil
 }

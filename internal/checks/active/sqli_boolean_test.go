@@ -124,3 +124,66 @@ func TestSQLiBooleanIgnoresAShrinkingPage(t *testing.T) {
 		t.Errorf("a page that only shrank was reported: %v", findings[0].Evidence.Matches)
 	}
 }
+
+// widebyteBooleanSite is a target whose connection is GBK and whose escaping is
+// addslashes — the classic combination in which the widened quote escapes. Every
+// plain spelling of the condition is neutralised here, so a finding can only come
+// from a family that rewrites the bytes.
+func widebyteBooleanSite(t *testing.T) *httptest.Server {
+	t.Helper()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		value := r.URL.Query().Get("name")
+		if value == "" {
+			value = r.FormValue("name")
+		}
+		// addslashes, then the GBK reading of `0xdf 0x5c` as one character: the
+		// backslash disappears into it and the quote survives.
+		escaped := strings.ReplaceAll(value, `\`, `\\`)
+		escaped = strings.ReplaceAll(escaped, `'`, `\'`)
+		escaped = strings.ReplaceAll(escaped, "\xdf\\'", "\xdf'")
+
+		// What the database sees: 0xdf is an ordinary character, so the quote after
+		// it is a quote. Every plain spelling arrives escaped and matches nothing.
+		rows := 1
+		switch {
+		case strings.Contains(escaped, "\xdf' OR 1=1-- -"),
+			strings.Contains(escaped, "\xdf' OR 2=2-- -"),
+			strings.Contains(escaped, "\xdf' AND 1=1-- -"),
+			strings.Contains(escaped, "\xdf' AND 2=2-- -"):
+			rows = 3
+		case strings.Contains(escaped, "\xdf' OR 1=2-- -"),
+			strings.Contains(escaped, "\xdf' OR 3=4-- -"),
+			strings.Contains(escaped, "\xdf' AND 1=2-- -"),
+			strings.Contains(escaped, "\xdf' AND 3=4-- -"):
+			rows = 0
+		}
+		w.Header().Set("Content-Type", "text/html")
+		fmt.Fprintf(w, "<html><body><p>rows: %d</p>%s</body></html>",
+			rows, strings.Repeat("<tr><td>row</td></tr>", rows))
+	}))
+	t.Cleanup(server.Close)
+	return server
+}
+
+// TestSQLiBooleanFiresThroughAWidenedQuote: the target escapes every plain
+// spelling, so only the mutation of a confirmation pair can reach it. Before the
+// families were mutated this check sent the literal forms and nothing else.
+func TestSQLiBooleanFiresThroughAWidenedQuote(t *testing.T) {
+	server := widebyteBooleanSite(t)
+	h := newHarness(t)
+	request, _ := httpmsg.NewRequest("GET", server.URL+"/user?name=admin")
+	baseline, err := h.client.Do(context.Background(), request)
+	if err != nil {
+		t.Fatalf("baseline: %v", err)
+	}
+	params := request.Params()
+	target := &checks.Target{Request: request, Response: baseline, Param: &params[0]}
+
+	findings := (sqliBoolean{}).Run(context.Background(), h.ctx, target)
+	if len(findings) == 0 {
+		t.Fatal("a target that only answers the widened quote was not reported")
+	}
+	if !strings.Contains(findings[0].Payload, "%df%27") && !strings.Contains(findings[0].Payload, "df%27") {
+		t.Logf("reported payload: %q", findings[0].Payload)
+	}
+}

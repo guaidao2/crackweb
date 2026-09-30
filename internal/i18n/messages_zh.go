@@ -65,11 +65,13 @@ var chinese = map[Key]string{
 	KeyFlagRaw:        "从原始 HTTP 请求文件读取要扫描的请求，例如 Burp 保存的报文。",
 	KeyFlagChecks:     "逗号分隔的检测项名称或标签，或 all。标为「需显式开启」的检测项不会被 all 拉进来。",
 	KeyFlagScanOutput: "报告输出路径，格式由扩展名决定（.html、.json、.sarif、.md）。",
+	KeyFlagScanForms:  "同时提交被扫描页面声明的表单，并测试每个表单实际发送的内容。表单提交到自己的地址、带自己的请求体，单扫一个 URL 是到不了那里的。",
 
-	KeyFlagDNSAddr:   "DNS 交互服务器的监听地址，例如 0.0.0.0:5353。",
-	KeyFlagHTTPAddr:  "HTTP 交互服务器的监听地址，例如 0.0.0.0:8081。",
-	KeyFlagOOBToken:  "用于把回调与触发它的请求关联起来的共享密钥。",
-	KeyFlagOOBDomain: "指向本服务器的基础域名，使用域名委派时填写。",
+	KeyFlagDNSAddr:       "DNS 交互服务器的监听地址，例如 0.0.0.0:5353。",
+	KeyFlagHTTPAddr:      "HTTP 交互服务器的监听地址，例如 0.0.0.0:8081。",
+	KeyFlagOOBToken:      "可选的共享密钥：既用于把回调与触发它的请求关联起来，也是 interactsh 服务器要求认证时填写的凭据。",
+	KeyFlagOOBDomain:     "指向本服务器的基础域名，使用域名委派时填写。",
+	KeyFlagOOBInteractsh: "用于收集带外交互的 interactsh 服务器，例如 oob.example.com；回调名在该域名下解析，因此目标无法回连本机时也能用。不指定则关闭带外测试。",
 
 	KeyFlagOutDir: "生成或导出 CA 材料的目录。",
 	KeyFlagForce:  "覆盖已存在的 CA 材料。",
@@ -296,6 +298,87 @@ var chinese = map[Key]string{
 
 	KeyEvidenceTypeBypass: "取值 %q 被以 %d 拒绝，而同样取值写成 %q 后被以 %d 应答",
 
+	KeyCheckWebSocketTitle: "WebSocket 握手接受任意来源",
+	KeyCheckWebSocketDesc: "该端点接受了来自它并不服务来源的 WebSocket 握手，且带着调用方已有的会话。" +
+		"WebSocket 握手不受同源策略约束，因此任何站点上的页面都能用访问者的凭据打开这个连接，并读取它承载的内容。",
+	KeyCheckWebSocketFix: "在握手时校验 Origin 头是否属于允许连接的来源列表，其余在升级之前就拒绝。" +
+		"要求首条消息里带令牌是另一种选择，但 Origin 是浏览器无法被说服不发送的那个检查。",
+	KeyCheckRefererBypassTitle: "保护依赖 Referer 头",
+	KeyCheckRefererBypassDesc: "按请求本来的方式发送时，服务器不可能签发的令牌被拒绝了；而令牌仍然伪造、" +
+		"只是去掉 Referer 头或把它指向别的站点，同一个请求却被接受。浏览器可能不发送这个头，而别的站点" +
+		"上的页面发送的是它自己的地址——所以只在“头存在且正确”时才生效的保护并不成立。",
+	KeyCheckRefererBypassFix: "用调用方必须从应用获取的令牌保护状态改变请求，并在每一条会改变状态的路径上" +
+		"校验它。Referer 与 Origin 最多只是辅助信号：用它们来拒绝，不要单独用它们来放行。",
+	KeyCheckContentTypeBypassTitle: "保护只挂在一种 Content-Type 上",
+	KeyCheckContentTypeBypassDesc: "按请求本来的方式发送时，服务器不可能签发的令牌被拒绝了；而请求体不变、" +
+		"只换一个 Content-Type，同一个请求却被接受——保护写在了某一个分支里，而调用方通过标注请求体来" +
+		"选择分支。",
+	KeyCheckContentTypeBypassFix: "先校验令牌，再按请求体类型分发；或者直接拒绝端点未明确接受的类型。" +
+		"写在单个分支里的保护只保护那个分支。",
+	KeyCheckJSONPTitle: "响应被包进调用方指定的回调名",
+	KeyCheckJSONPDesc: "端点把响应包进了请求所指定的回调名里，这正是 JSONP 接口的行为：任何站点都能把" +
+		"它当作脚本来加载，并读取它返回的内容。这有多大影响取决于该端点提供什么——若它这样返回会话" +
+		"令牌，那就是跨站读取了它。",
+	KeyCheckJSONPFix: "在同源策略下提供数据，让客户端显式携带凭据：用带白名单的 CORS，而不是回调；" +
+		"如果确实必须支持回调，就要同时校验回调名与调用方来源。",
+	KeyCheckExposedPathTitle: "被对外提供的、本不该提供的文件",
+	KeyCheckExposedPathDesc: "请求一个没有任何链接指向它的常见路径，返回的文件里带着这类文件特有的内容：" +
+		"含凭据的环境文件、带完整历史的 git 目录、数据库导出、配置备份、状态页。这些文件爬不到——它们" +
+		"是靠按名字直接请求才发现的，而这正是攻击者最先做的事。",
+	KeyCheckExposedPathFix: "只对外提供应用真正需要的内容：把这些文件放在文档根之外；在服务器配置里按" +
+		"文件名显式拒绝，作为兜底；不要把备份和版本控制元数据随代码一起部署。",
+	KeyCheckCORSOriginTitle: "信任请求所带来源的跨域策略",
+	KeyCheckCORSOriginDesc: "响应在 Access-Control-Allow-Origin 里写下了请求携带的那个来源，而这个来源" +
+		"不是任何正确配置会接受的。这个授权正是别的站点能在访问者浏览器里读取本站响应的原因；若同时允许" +
+		"携带凭据，那就等于任何站点都能带着访问者自己的凭据来读。它通常来自手写的比较逻辑——把主机名当" +
+		"前缀或后缀匹配、不比较协议，或者因为沙箱 iframe 会送出 `null` 就放行 `null`。",
+	KeyCheckCORSOriginFix: "把完整来源（含协议）与一份清单逐字比较，绝不要用请求现场拼出来。需要放行多个" +
+		"来源时逐个完整校验；`null` 不是应当放行的来源。只在确实需要时才允许携带凭据。",
+	KeyCheckHTTPPutTitle: "通过 PUT 方法写入文件",
+	KeyCheckHTTPPutDesc: "服务器把 PUT 请求的请求体按该请求所指的路径存了下来，并从同一个地址把它" +
+		"提供出去。这是一个没有人有意配置的上传端点——静态站点、构建产物目录、只配了一半的 WebDAV " +
+		"都会落在这里——而文件名由调用者决定，也就意味着调用者决定了服务器会运行什么扩展名。",
+	KeyCheckHTTPPutFix: "对不是有意作为上传端点的位置，在服务器层面拒绝写方法：关闭 WebDAV；确实需要 " +
+		"PUT 时，把它限制在需要认证、且内容永不执行的路径上。",
+	KeyCheckIPSpoofTitle: "伪造客户端地址即可打开的受限端点",
+	KeyCheckIPSpoofDesc: "该端点拒绝了请求，而一旦加上一个写着回环或内网地址的请求头，它就答应了。" +
+		"这说明限制施加在**调用者自称**的地址上，而不是它实际连接的地址上——而自称的地址谁都能写。" +
+		"X-Forwarded-For 这类头是由前端设置的，只有在确定确实由它设置时才值得信任；能直接访问到的" +
+		"应用分辨不出两者的区别。",
+	KeyCheckIPSpoofFix: "客户端地址要取连接本身的来源，而不是请求头。前面有代理时，让代理**覆盖**该头" +
+		"而不是追加，把来源限制为代理的地址，并让应用拒绝不是来自代理的请求。",
+	KeyCheckPathOverrideTitle: "由请求头决定的处理路径",
+	KeyCheckPathOverrideDesc: "一个请求头（X-Original-URL、X-Rewrite-URL 之类）决定了应用处理哪个路径：" +
+		"请求一个并不存在的路径，返回的却是另一个路径的响应。这类头的用途是：前端代理按 URL 路由，" +
+		"把原本要访问的路径通过请求头交给后端；只有当后端坚持要求请求确实来自那个代理时才安全。" +
+		"做不到这一点时，代理按一个路径做的访问控制，与应用实际服务的路径并不是同一个。",
+	KeyCheckPathOverrideFix: "不要采信请求里的路径类请求头，或在边缘转发前把它们剥掉，并让应用只能经由代理" +
+		"访问——这样绕过代理的请求根本无法到达。",
+	KeyCheckCSPTitle: "未能限制脚本的 Content-Security-Policy",
+	KeyCheckCSPDesc: "响应里带了 Content-Security-Policy，但它放行了这条策略本来要拦的东西：" +
+		"内联脚本（`'unsafe-inline'`）、动态求值（`'unsafe-eval'`）、任意来源（`*`），或把 " +
+		"`data:` 当作脚本来源。正因为头是存在的，这种问题很容易被忽略——一个允许内联脚本的策略，" +
+		"对注入进来的 `<script>` 起不到任何作用，而它本该是那道纵深防线。只以 " +
+		"`Content-Security-Policy-Report-Only` 下发时，策略根本不生效。",
+	KeyCheckCSPFix: "从 script 指令里去掉 `'unsafe-inline'` 与 `'unsafe-eval'`，把内联代码移到文件里；" +
+		"若必须内联，就用每次响应不同的 nonce（`'nonce-…'`）把它钉住——有 nonce 时浏览器会忽略 " +
+		"`'unsafe-inline'`，所以已经带 nonce 的策略比看起来更严格。把需要来源逐个写出来而不是用 `*`；" +
+		"等报告安静下来后，把策略从 Report-Only 改为正式下发。",
+	KeyCheckCSTITitle: "客户端模板注入",
+	KeyCheckCSTIDesc: "来自地址栏的值被交给了浏览器的模板编译器，编译器把它当成表达式求值了。服务端" +
+		"无论哪种情况返回的字节都一样，所以任何只看响应的手段都发现不了它：变的是页面渲染出来的内容。" +
+		"它值得关注，是因为同一类能算出算术的输入，在这种编译器自己的语法里是可以携带代码的——一个会" +
+		"编译自己地址的页面，它的地址就是代码。",
+	KeyCheckCSTIFix: "绝不要编译来自地址栏的值。把它当数据传递——用 `ng-bind` 或文本绑定，而不是模板——" +
+		"并保持框架为最新版本，因为这类缺陷多数是在编译器里修掉的。",
+	KeyCheckPrototypePollutionTitle: "查询串导致的原型污染",
+	KeyCheckPrototypePollutionDesc: "页面自身的代码把查询串合并进了对象，且没有拒绝 `__proto__`，" +
+		"于是请求里的属性名被写到了 `Object.prototype` 上。此后创建的每个对象——页面里的、它加载的每个" +
+		"脚本里的、它调用的每个库里的——都会继承这个属性。攻击者能拿到什么取决于谁读它：关闭某个检查的" +
+		"开关、被改写的默认跳转、一路走到 DOM 危险的 gadget。",
+	KeyCheckPrototypePollutionFix: "在解析查询串的地方直接拒绝 `__proto__`、`constructor` 和 " +
+		"`prototype` 作为键名；需要查表时用 `Object.create(null)` 或 Map 来构建对象。作为兜底可以冻结 " +
+		"`Object.prototype`，并保持解析库为最新版本——多数原型污染缺陷是在库里修掉的。",
 	KeyCheckDOMXSSTitle: "页面自身脚本导致的跨站脚本",
 	KeyCheckDOMXSSDesc: "页面从 URL 里取了一个值，并把它当成标记写进了文档，浏览器执行时把它运行了。" +
 		"服务端根本没有看到这个 payload——值来自地址栏——所以任何服务端侧过滤都无从拦截，" +
@@ -356,7 +439,8 @@ var chinese = map[Key]string{
 
 	KeyCheckCMDiTitle: "命令注入",
 	KeyCheckCMDiDesc: "该参数未经转义就传给了 shell，攻击者因此能以 Web 服务器的权限" +
-		"执行任意操作系统命令。",
+		"执行任意操作系统命令。判定有两条取证路径：响应里带回了被测命令读取的文件内容，" +
+		"或者目标回调了扫描器控制的地址。",
 	KeyCheckCMDiFix: "尽量避免走 shell：使用 API，或以参数数组的形式调用 exec。" +
 		"若确实无法避免 shell，请对允许的字符与取值做白名单限制。",
 
@@ -436,6 +520,7 @@ var chinese = map[Key]string{
 	KeyMsgScanFinished:        "扫描完成：%d 个漏洞，共发出 %d 个请求，耗时 %s",
 	KeyMsgNoFindings:          "未发现漏洞",
 	KeyMsgOOBListening:        "带外交互服务器已监听：http %s，dns %s",
+	KeyMsgOOBInteractsh:       "带外交互记录收集于 %s",
 	KeyMsgUnknownChecks:       "未知的检测项或标签：%s",
 	KeyMsgChecksLoaded:        "已加载 %d 个检测项：被动 %d 个，主动 %d 个",
 	KeyMsgRequestError:        "请求失败：%v",

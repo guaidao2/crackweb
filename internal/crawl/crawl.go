@@ -448,12 +448,20 @@ func (c *Crawler) fetchOne(ctx context.Context, item queueItem) fetchResult {
 		c.mu.Unlock()
 	}
 
-	// Feed the exchange to the scanner before parsing: every page the crawl
-	// touches is worth a passive look even if it yields no links.
-	if c.opts.OnExchange != nil {
+	// Feed the exchange to the scanner before parsing: every page the crawl touches is worth a
+	// passive look even if it yields no links.
+	//
+	// A discovery request is the exception, and only when it came back empty. It asks the site
+	// about itself — a description, a robots file, a sitemap — and the usual answer is that
+	// there is no such file. Handing that 404 to the checks runs every probe in the tool
+	// against the same absence, once per guessed address, which is where a crawl of four
+	// endpoints spends most of its requests. A description that exists is a page, and is
+	// scanned as one.
+	worthScanning := !item.discovery || resp.Status < 400
+	if worthScanning && c.opts.OnExchange != nil {
 		c.opts.OnExchange(req, resp)
 	}
-	if c.opts.OnURL != nil {
+	if worthScanning && c.opts.OnURL != nil {
 		c.opts.OnURL(item.url)
 	}
 
@@ -550,25 +558,37 @@ func (c *Crawler) fetchOne(ctx context.Context, item queueItem) fetchResult {
 // applications often accept either, and the parameter is what matters for
 // scanning, not the verb.
 func (c *Crawler) submitForm(ctx context.Context, form Form, base *url.URL) {
+	for _, req := range FormRequests(form, base) {
+		if _, ok := c.accept(req.URLString(), 0); !ok {
+			continue
+		}
+		c.deliver(ctx, req)
+	}
+}
+
+// FormRequests turns a discovered form into the requests a user would generate.
+//
+// The verb the form declares is the verb used, and the encoding it declares decides the body:
+// a form carrying a file input has to be sent as multipart, because one sent as a urlencoded
+// body is refused by the upload endpoint before it looks at a single field — which is how an
+// upload form ends up looking like a form with nothing to test.
+//
+// This is exported because scanning a single URL needs exactly what crawling does: a page that
+// declares a form is only testable through the request that form produces, and a one-shot scan
+// never gets there by itself.
+func FormRequests(form Form, base *url.URL) []*httpmsg.Request {
 	target := form.URL(base)
 	if target == "" {
-		return
-	}
-	if _, ok := c.accept(target, 0); !ok {
-		return
+		return nil
 	}
 
 	switch strings.ToUpper(form.Method) {
 	case "POST":
 		req, err := httpmsg.NewRequest("POST", target)
 		if err != nil {
-			return
+			return nil
 		}
 		req.Origin = httpmsg.OriginCrawler
-		// The encoding the form declares decides the body. A form carrying a file input
-		// has to be sent as multipart — one sent as a urlencoded body is refused by the
-		// upload endpoint before it looks at a single field, which is how an upload form
-		// ends up looking like a form with nothing to test.
 		if form.IsMultipart() {
 			body, contentType := form.EncodeMultipart()
 			req.Body = body
@@ -578,14 +598,14 @@ func (c *Crawler) submitForm(ctx context.Context, form Form, base *url.URL) {
 			req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 		}
 		req.Header.Set("Content-Length", fmt.Sprint(len(req.Body)))
-		c.deliver(ctx, req)
+		return []*httpmsg.Request{req}
 	default:
 		req, err := httpmsg.NewRequest("GET", target+"?"+form.EncodeBody())
 		if err != nil {
-			return
+			return nil
 		}
 		req.Origin = httpmsg.OriginCrawler
-		c.deliver(ctx, req)
+		return []*httpmsg.Request{req}
 	}
 }
 

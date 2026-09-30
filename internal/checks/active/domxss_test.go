@@ -14,6 +14,10 @@ import (
 type fakeBrowser struct {
 	embedded bool
 	asked    []string
+	// evalResult is what Eval answers, and evalFor limits that answer to addresses
+	// carrying it — a page reaches runtime state only after the value arrives.
+	evalResult string
+	evalFor    string
 }
 
 func (f *fakeBrowser) Probe(_ context.Context, target, marker string) (bool, string, error) {
@@ -22,6 +26,15 @@ func (f *fakeBrowser) Probe(_ context.Context, target, marker string) (bool, str
 		return false, "", nil
 	}
 	return true, "<body> <img src=x id=" + marker + ">", nil
+}
+
+// Eval answers with the value the test set, and records the address like Probe.
+func (f *fakeBrowser) Eval(_ context.Context, target, expression string) (string, error) {
+	f.asked = append(f.asked, target)
+	if f.evalResult != "" && f.evalFor != "" && !strings.Contains(target, f.evalFor) {
+		return "", nil
+	}
+	return f.evalResult, nil
 }
 
 func domTarget(t *testing.T, rawURL string) *checks.Target {
@@ -94,8 +107,9 @@ func TestDOMCandidatesCarryTheValueInTheFragmentAndParameters(t *testing.T) {
 		t.Fatalf("NewRequest: %v", err)
 	}
 	candidates := domCandidates(request, domProbe)
-	if len(candidates) != 3 {
-		t.Fatalf("got %d candidates, want 3 (fragment plus two parameters)", len(candidates))
+	// The fragment, the hashbang, the path, then one per query parameter.
+	if len(candidates) != 5 {
+		t.Fatalf("got %d candidates, want 5", len(candidates))
 	}
 
 	fragment := candidates[0]
@@ -105,8 +119,16 @@ func TestDOMCandidatesCarryTheValueInTheFragmentAndParameters(t *testing.T) {
 	if !strings.Contains(fragment.url, "#<img") {
 		t.Errorf("the fragment payload was encoded before it was sent: %s", fragment.url)
 	}
+	// The other two carriers of the value: a router's `#!` and the path the page
+	// routes on. Neither is encoded, for the same reason as the fragment.
+	if got := candidates[1]; got.name != "hashbang fragment" || !strings.Contains(got.url, "#!<img") {
+		t.Errorf("hashbang candidate = %q %s", got.name, got.url)
+	}
+	if got := candidates[2]; got.name != "url path" || !strings.Contains(got.url, "/<img") {
+		t.Errorf("path candidate = %q %s", got.name, got.url)
+	}
 
-	for _, candidate := range candidates[1:] {
+	for _, candidate := range candidates[3:] {
 		if !strings.Contains(candidate.url, candidate.marker) {
 			t.Errorf("candidate %q does not carry its marker: %s", candidate.name, candidate.url)
 		}

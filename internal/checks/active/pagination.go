@@ -29,7 +29,7 @@ func (paginationBypass) DescriptionKey() i18n.Key   { return i18n.KeyCheckPagina
 func (paginationBypass) RemediationKey() i18n.Key   { return i18n.KeyCheckPaginationFix }
 func (paginationBypass) Severity() finding.Severity { return finding.SeverityMedium }
 func (paginationBypass) Tags() []string {
-	return []string{"active", "authorization", "pagination", "owasp-top10"}
+	return []string{"active", "authorization", "access-control", "pagination", "owasp-top10"}
 }
 func (paginationBypass) Passive() bool { return false }
 

@@ -118,3 +118,48 @@ func TestEncodeMultipartCarriesFieldsAndAFilePart(t *testing.T) {
 		t.Errorf("scanner sees %d addressable fields, want 2 (the text field and the file name)", got)
 	}
 }
+
+// TestFormRequestsBuildsWhatTheFormDeclares pins the shape a scan depends on: a form is only
+// testable through the request it produces, so the verb, the action, the encoding and the
+// fields all have to survive the conversion.
+func TestFormRequestsBuildsWhatTheFormDeclares(t *testing.T) {
+	base, _ := url.Parse("http://target.example/account/login")
+
+	post := Form{
+		Action: "/account/session",
+		Method: "POST",
+		Fields: []Field{{Name: "user", Value: "a", Type: "text"}, {Name: "pass", Value: "b", Type: "password"}},
+	}
+	requests := FormRequests(post, base)
+	if len(requests) != 1 {
+		t.Fatalf("got %d requests, want 1", len(requests))
+	}
+	if got := requests[0].Method; got != "POST" {
+		t.Errorf("method = %q, want POST", got)
+	}
+	if got := requests[0].URLString(); got != "http://target.example/account/session" {
+		t.Errorf("url = %q", got)
+	}
+	if got := requests[0].Header.Get("Content-Type"); !strings.Contains(got, "x-www-form-urlencoded") {
+		t.Errorf("content type = %q", got)
+	}
+	if body := string(requests[0].Body); !strings.Contains(body, "user=a") || !strings.Contains(body, "pass=b") {
+		t.Errorf("body = %q, want both fields", body)
+	}
+
+	get := Form{Action: "/search", Method: "GET", Fields: []Field{{Name: "q", Value: "x"}}}
+	requests = FormRequests(get, base)
+	if len(requests) != 1 {
+		t.Fatalf("got %d requests, want 1", len(requests))
+	}
+	if got := requests[0].URLString(); !strings.HasPrefix(got, "http://target.example/search?") {
+		t.Errorf("url = %q, want the fields in the query", got)
+	}
+
+	// An empty action posts back to the page the form was found on.
+	empty := Form{Method: "POST", Fields: []Field{{Name: "a", Value: "1"}}}
+	requests = FormRequests(empty, base)
+	if len(requests) != 1 || requests[0].URLString() != "http://target.example/account/login" {
+		t.Errorf("an empty action did not resolve to the page itself: %v", requests)
+	}
+}

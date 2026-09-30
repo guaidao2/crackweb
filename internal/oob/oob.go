@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"sync"
@@ -147,11 +148,16 @@ func (s *Server) Start(ctx context.Context) error {
 		go s.serveDNS()
 	}
 
-	err = s.httpServer.Serve(httpListener)
-	if err == http.ErrServerClosed {
-		return nil
-	}
-	return err
+	// The HTTP listener serves in the background, like the DNS one: the caller is a
+	// scan that has to carry on with its checks, and only `crackweb oob` wants to
+	// wait. A bind failure has already been reported by the Listen call above, so
+	// returning here means the server is up.
+	go func() {
+		if err := s.httpServer.Serve(httpListener); err != nil && err != http.ErrServerClosed {
+			s.opts.Logf("oob: HTTP callbacks stopped: %v", err)
+		}
+	}()
+	return nil
 }
 
 // Close stops both listeners.
@@ -306,13 +312,16 @@ func (s *Server) handleHTTP(w http.ResponseWriter, r *http.Request) {
 
 // tokenFromHTTP extracts the token from a callback request.
 func (s *Server) tokenFromHTTP(r *http.Request) string {
+	// Every candidate is checked against the tokens this server minted. A name
+	// that is not one of ours is part of the target's own path or domain, and
+	// treating it as a token would both lose the interaction and mislabel it.
 	if path := strings.Trim(r.URL.Path, "/"); path != "" {
 		// The first path segment is the token; anything after it is the
 		// target's own doing.
-		if token, _, ok := strings.Cut(path, "/"); ok {
-			return token
+		first, _, _ := strings.Cut(path, "/")
+		if s.knownToken(first) {
+			return first
 		}
-		return path
 	}
 
 	host := r.Host
@@ -321,10 +330,50 @@ func (s *Server) tokenFromHTTP(r *http.Request) string {
 	}
 	if domain := s.opts.Domain; domain != "" {
 		if label, ok := strings.CutSuffix(host, "."+domain); ok {
-			if first, _, found := strings.Cut(label, "."); found {
-				return first
+			candidate, _, _ := strings.Cut(label, ".")
+			if s.knownToken(candidate) {
+				return candidate
 			}
-			return label
+		}
+	}
+
+	// The callback may arrive with our URL carried inside a parameter of the
+	// target's own — `?url=http://…/<token>`. That is exactly what a server-side
+	// fetch looks like when the application passed the value along, and the
+	// interaction is attributed only if the token is looked for there too.
+	// Matching is against the tokens this server minted, so nothing else in the
+	// query can be mistaken for one.
+	return s.knownTokenIn(r.URL.RawQuery)
+}
+
+// knownToken reports whether name is a token this server issued.
+func (s *Server) knownToken(name string) bool {
+	if name == "" {
+		return false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, ok := s.labels[name]
+	return ok
+}
+
+// knownTokenIn returns the token this server issued that appears in value, or an
+// empty string.
+func (s *Server) knownTokenIn(value string) string {
+	if value == "" {
+		return ""
+	}
+	// The query is percent-encoded; a token is hexadecimal and survives encoding
+	// unchanged, so the raw string can be searched directly.
+	decoded := value
+	if unescaped, err := url.QueryUnescape(value); err == nil {
+		decoded = unescaped
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for token := range s.labels {
+		if strings.Contains(decoded, token) {
+			return token
 		}
 	}
 	return ""

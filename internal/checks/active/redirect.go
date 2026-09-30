@@ -215,6 +215,14 @@ var crlfSeeds = []string{
 	"\r\n\t" + crlfHeaderName + ": crlf",
 	"\n " + crlfHeaderName + ": crlf",
 	"\r\n" + crlfHeaderName + ":%20crlf",
+
+	// The UTF-8 encodings of U+560D and U+560A, whose low bytes are CR and LF.
+	// A parser that decodes a multi-byte sequence into one 16-bit character and
+	// then keeps the low byte reads this as a line break, which is how a filter
+	// that looks for `\r`, `\n` or `%0d` lets it through. The bytes are written
+	// out as they are so the mutation engine encodes them once, like the control
+	// characters above; a hand-written `%e5%98%8d` would go out as `%25e5...`.
+	"\xe5\x98\x8d\xe5\x98\x8a" + crlfHeaderName + ": crlf",
 }
 
 // crlfInjection detects header injection through an unescaped parameter.

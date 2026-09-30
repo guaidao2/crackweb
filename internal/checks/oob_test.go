@@ -2,32 +2,56 @@ package checks
 
 import "testing"
 
-func TestNumericHostForms(t *testing.T) {
-	// 192.168.44.149 is 3232246933, and 0xC0A82C95.
-	decimal, hexadecimal, ok := numericHostForms("192.168.44.149:8081")
-	if !ok {
-		t.Fatal("a dotted address has numeric forms")
+// TestAddressSpellingsCoverTheOtherWritings: each spelling is the same address to
+// a resolver and a different string to a filter.
+func TestAddressSpellingsCoverTheOtherWritings(t *testing.T) {
+	spellings := addressSpellings("192.168.44.149:8081")
+	if spellings == nil {
+		t.Fatal("a dotted address has other spellings")
 	}
-	if decimal != "3232246933:8081" {
-		t.Errorf("decimal = %q, want %q", decimal, "3232246933:8081")
+	want := map[string]string{
+		CallbackHostDecimal: "3232246933:8081",
+		CallbackHostHex:     "0xc0a82c95:8081",
+		CallbackHostOctal:   "0300.0250.054.0225:8081",
+		CallbackHostMapped:  "[::ffff:192.168.44.149]:8081",
 	}
-	if hexadecimal != "0xc0a82c95:8081" {
-		t.Errorf("hexadecimal = %q, want %q", hexadecimal, "0xc0a82c95:8081")
+	for placeholder, expected := range want {
+		if got := spellings[placeholder]; got != expected {
+			t.Errorf("%s = %q, want %q", placeholder, got, expected)
+		}
 	}
-
-	// Without a port.
-	decimal, _, ok = numericHostForms("127.0.0.1")
-	if !ok || decimal != "2130706433" {
-		t.Errorf("numericHostForms(127.0.0.1) = %q, %v", decimal, ok)
+	// The octets between the first and the last are not zero here, so the short
+	// form would name a different host and must not be offered at all.
+	if got, ok := spellings[CallbackHostShort]; ok {
+		t.Errorf("short form offered for 192.168.44.149: %q", got)
 	}
 }
 
-func TestNumericHostFormsRefusesWhatIsNotAnAddress(t *testing.T) {
-	// A name has no numeric spelling, and inventing one would send a payload that tests
-	// nothing.
+// TestAddressSpellingsShortFormOnlyWhenItIsTheSameAddress: `127.1` is 127.0.0.1,
+// and it is offered only when that is true.
+func TestAddressSpellingsShortFormOnlyWhenItIsTheSameAddress(t *testing.T) {
+	spellings := addressSpellings("127.0.0.1")
+	if spellings == nil {
+		t.Fatal("no spellings for a loopback address")
+	}
+	for placeholder, expected := range map[string]string{
+		CallbackHostDecimal: "2130706433",
+		CallbackHostOctal:   "0177.00.00.01",
+		CallbackHostShort:   "127.1",
+		CallbackHostMapped:  "[::ffff:127.0.0.1]",
+	} {
+		if got := spellings[placeholder]; got != expected {
+			t.Errorf("%s = %q, want %q", placeholder, got, expected)
+		}
+	}
+}
+
+func TestAddressSpellingsRefuseWhatIsNotAnAddress(t *testing.T) {
+	// A name has no address spelling, and inventing one would send a payload that
+	// tests nothing.
 	for _, host := range []string{"callback.example.com", "callback.example.com:8081", "::1"} {
-		if _, _, ok := numericHostForms(host); ok {
-			t.Errorf("%q was given a numeric form", host)
+		if addressSpellings(host) != nil {
+			t.Errorf("%q was given an address spelling", host)
 		}
 	}
 }

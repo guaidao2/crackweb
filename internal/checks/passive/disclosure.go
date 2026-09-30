@@ -26,30 +26,35 @@ const maxScanBytes = 256 << 10
 var errorSignatures = []struct {
 	text  string
 	label string
+	// internal marks the signatures that carry the application's own structure — a class name, a
+	// file path, a framework frame — rather than only the fact that something failed. Those are
+	// what tell a reader which library and which version to look up, and where in the source the
+	// failure came from.
+	internal bool
 }{
-	{"traceback (most recent call last)", "Python traceback"},
-	{"goroutine 1 [running]:", "Go panic"},
-	{"exception in thread", "Java exception"},
-	{"java.lang.", "Java exception class"},
-	{"org.springframework.", "Spring stack frame"},
-	{"at org.apache.", "Java stack frame"},
-	{"system.nullreferenceexception", ".NET exception"},
-	{"system.web.httpexception", ".NET exception"},
-	{"fatal error:", "PHP fatal error"},
-	{"parse error:", "PHP parse error"},
-	{"undefined index", "PHP undefined index"},
-	{"undefined variable", "PHP undefined variable"},
-	{"warning: mysql", "MySQL warning"},
-	{"whitelabel error page", "Spring Boot error page"},
-	{"template syntax error", "Template engine error"},
-	{"jinja2.exceptions", "Jinja2 exception"},
-	{"django.core.exceptions", "Django exception"},
-	{"actioncontroller::", "Rails exception"},
-	{"sqlstate[", "SQLSTATE error"},
-	{"you have an error in your sql syntax", "MySQL syntax error"},
-	{"unclosed quotation mark", "SQL Server syntax error"},
-	{"unhandled exception", "Unhandled exception"},
-	{"stack trace:", "Stack trace"},
+	{"traceback (most recent call last)", "Python traceback", true},
+	{"goroutine 1 [running]:", "Go panic", true},
+	{"exception in thread", "Java exception", true},
+	{"java.lang.", "Java exception class", true},
+	{"org.springframework.", "Spring stack frame", true},
+	{"at org.apache.", "Java stack frame", true},
+	{"system.nullreferenceexception", ".NET exception", true},
+	{"system.web.httpexception", ".NET exception", true},
+	{"fatal error:", "PHP fatal error", false},
+	{"parse error:", "PHP parse error", false},
+	{"undefined index", "PHP undefined index", false},
+	{"undefined variable", "PHP undefined variable", false},
+	{"warning: mysql", "MySQL warning", false},
+	{"whitelabel error page", "Spring Boot error page", false},
+	{"template syntax error", "Template engine error", false},
+	{"jinja2.exceptions", "Jinja2 exception", true},
+	{"django.core.exceptions", "Django exception", true},
+	{"actioncontroller::", "Rails exception", true},
+	{"sqlstate[", "SQLSTATE error", false},
+	{"you have an error in your sql syntax", "MySQL syntax error", false},
+	{"unclosed quotation mark", "SQL Server syntax error", false},
+	{"unhandled exception", "Unhandled exception", true},
+	{"stack trace:", "Stack trace", true},
 }
 
 // errorDisclosure reports a response that carries the application's own failure detail.
@@ -77,9 +82,13 @@ func (errorDisclosure) Run(_ context.Context, _ *checks.Context, t *checks.Targe
 	body := strings.ToLower(bodyForScan(t.Response.Body))
 
 	var matches []string
+	structural := false
 	for _, signature := range errorSignatures {
 		if strings.Contains(body, signature.text) {
 			matches = append(matches, signature.label)
+			if signature.internal {
+				structural = true
+			}
 		}
 	}
 	if len(matches) == 0 {
@@ -89,6 +98,11 @@ func (errorDisclosure) Run(_ context.Context, _ *checks.Context, t *checks.Targe
 	f := checks.NewFinding(errorDisclosure{}, t,
 		i18n.KeyCheckErrorDisclosureTitle, i18n.KeyCheckErrorDisclosureDesc,
 		i18n.KeyCheckErrorDisclosureFix)
+	// A failure that names its own internals is worth more than one that only says it failed: the
+	// class, the frame and the file are what lead to the version and to the line.
+	if structural {
+		f.Severity = finding.SeverityMedium
+	}
 	// Firm rather than certain: a page that documents these very strings would match too.
 	f.Confidence = finding.ConfidenceFirm
 	f.DedupHostOnly = true
@@ -185,13 +199,19 @@ func (contentDisclosure) Run(_ context.Context, _ *checks.Context, t *checks.Tar
 	body := bodyForScan(t.Response.Body)
 
 	var kinds []string
+	// Where the application lives on disk is worth more than the other two: a path names the
+	// layout a file-read or a traversal would have to reach, and it is the difference between
+	// knowing a host has an internal network and knowing what to ask that host for.
+	serverPath := false
 	if match := privateIPv4Re.FindString(body); match != "" {
 		kinds = append(kinds, "internal address: "+match)
 	}
 	if match := unixPathRe.FindString(body); match != "" {
 		kinds = append(kinds, "server-side path: "+match)
+		serverPath = true
 	} else if match := windowsPathRe.FindString(body); match != "" {
 		kinds = append(kinds, "server-side path: "+match)
+		serverPath = true
 	}
 	// Only the domain of a mailbox is kept. A published address is somebody's personal
 	// data, and the report has no need for it to make its point.
@@ -209,6 +229,12 @@ func (contentDisclosure) Run(_ context.Context, _ *checks.Context, t *checks.Tar
 	f := checks.NewFinding(contentDisclosure{}, t,
 		i18n.KeyCheckContentDisclosureTitle, i18n.KeyCheckContentDisclosureDesc,
 		i18n.KeyCheckContentDisclosureFix)
+	// A path is worth more than the other two kinds. It names where the application lives on
+	// disk, which is what a file-read or a traversal would have to reach; an internal address
+	// says only that a private network exists, and a mailbox domain says who runs the site.
+	if serverPath {
+		f.Severity = finding.SeverityMedium
+	}
 	f.Confidence = finding.ConfidenceFirm
 	f.DedupHostOnly = true
 	f.DedupExtra = strings.Join(kinds, ";")

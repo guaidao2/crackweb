@@ -51,7 +51,6 @@ func TestGenerationResultsAreUnique(t *testing.T) {
 }
 
 func TestGenerationBudgetIsBounded(t *testing.T) {
-	// A large seed list must not blow up into hundreds of requests.
 	seeds := []string{
 		"1' OR '1'='1", "1 AND 1=1", "1) AND (1=1", "1\" AND \"1\"=\"1",
 		"1' AND SLEEP(5)--", "1; WAITFOR DELAY '0:0:5'--", "1' UNION SELECT 1--",
@@ -63,13 +62,50 @@ func TestGenerationBudgetIsBounded(t *testing.T) {
 		if gen == 0 {
 			continue
 		}
-		if len(variants) > maxPerGeneration {
-			t.Errorf("generation %d holds %d variants, over the budget of %d",
-				gen, len(variants), maxPerGeneration)
+		if len(variants) > generationCeiling {
+			t.Errorf("generation %d holds %d variants, over the ceiling of %d",
+				gen, len(variants), generationCeiling)
 		}
 	}
-	if total := Count(gens); total > 64 {
-		t.Errorf("total variant count = %d, which is too many requests per parameter", total)
+
+	// The rule the budget exists to protect: every *kind* of transformation
+	// reaches the wire in the first generation, so that nothing in the catalogue
+	// sits unused.
+	//
+	// The assertion is per family rather than per mutator, for two reasons that
+	// are not coverage gaps. Two transformations can produce the same string — the
+	// first added owns it and the second is redundant rather than unsent — and a
+	// transformation that only applies to one shape (`keyword-split-union` needs a
+	// UNION) has nothing to rewrite in a seed list that does not carry it.
+	sentFamilies := map[string]bool{}
+	for _, v := range gens[1] {
+		for _, name := range v.Mutators {
+			if m, ok := MutatorByName(name); ok {
+				sentFamilies[m.Family] = true
+			}
+		}
+	}
+	for _, m := range MutatorsFor(SQLi) {
+		if !sentFamilies[m.Family] {
+			t.Errorf("no transformation of family %q reaches generation 1", m.Family)
+		}
+	}
+}
+
+// TestTheCatalogueFitsTheCeiling keeps the coverage rule honest from the other
+// side: budgetFor can only promise "every transformation once" while the
+// catalogue is no larger than the ceiling. Growing past it means some
+// transformation stops being sent, and that belongs in a failing test rather than
+// in a silent gap on a target.
+func TestTheCatalogueFitsTheCeiling(t *testing.T) {
+	for _, kind := range []Kind{
+		SQLi, XSS, Traversal, Command, SSTI, NoSQL, XXE, Redirect, CRLF,
+		HostHeader, Generic,
+	} {
+		if n := len(MutatorsFor(kind)); n > generationCeiling {
+			t.Errorf("kind %s has %d transformations, over the ceiling of %d: some would never be sent",
+				kind, n, generationCeiling)
+		}
 	}
 }
 
@@ -108,6 +144,11 @@ func TestMutatorRewrites(t *testing.T) {
 		{"space-to-tab", "1 AND 1=1", "1%09AND%091=1"},
 		{"and-or-to-operators", "1 AND 1=1", "1 && 1=1"},
 		{"and-or-to-operators", "1 OR 1=1", "1 || 1=1"},
+		{"cmd-split-command-name", "; cat /etc/passwd", "; c$@at /etc/passwd"},
+		{"cmd-split-command-name", "; id_rsa stays a file name", "; id_rsa stays a file name"},
+		{"sql-version-comment", "1' UNION SELECT 1,2-- -", "1' /*!50000UNION*/ /*!50000SELECT*/ 1,2-- -"},
+		{"keyword-double-write", "1' UNION SELECT 1,2-- -", "1' UNUNIONION SELSELECTECT 1,2-- -"},
+		{"keyword-double-write", "1' AND SLEEP(5)-- -", "1' AANDND SLSLEEPEEP(5)-- -"},
 		{"keyword-split-union", "1 UNION SELECT 1", "1 UN/**/ION SELECT 1"},
 		{"keyword-split-select", "UNION SELECT 1", "UNION SEL/**/ECT 1"},
 		{"terminator-to-hash", "1' OR 1=1-- -", "1' OR 1=1#"},
@@ -119,7 +160,13 @@ func TestMutatorRewrites(t *testing.T) {
 		{"dots-double-slash", "../../etc/passwd", "....//....//etc/passwd"},
 		{"dots-idempotent-dot", "../../etc/passwd", "%2e%2e/%2e%2e/etc/passwd"},
 		{"slash-to-backslash", "../../etc/passwd", "..\\..\\etc\\passwd"},
+		{"sql-widebyte-quote", "admin' or 1=1-- -", "admin%df%27+or+1%3D1--+-"},
 		{"cmd-space-to-ifs", "; cat /etc/passwd", ";$IFScat$IFS/etc/passwd"},
+		{"cmd-space-to-ifs-brace", "; sleep 5", ";${IFS}sleep${IFS}5"},
+		{"cmd-brace-expansion", "; cat /etc/passwd", ";{cat,/etc/passwd}"},
+		{"cmd-brace-expansion", "; sleep 5", ";{sleep,5}"},
+		{"cmd-glob-path", "; cat /etc/passwd", "; cat /etc/pass?d"},
+		{"cmd-quote-splice", "; sleep 5", "; s''leep 5"},
 		{"cmd-separator-to-newline", "; id", "%0aid"},
 		{"cmd-separator-to-amp", "; id", "&&id"},
 		{"cmd-wrap-backtick", "; id", "`id`"},

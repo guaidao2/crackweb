@@ -225,9 +225,16 @@ func (c *Client) attempt(ctx context.Context, req *httpmsg.Request) (*httpmsg.Re
 	}
 	defer raw.Body.Close()
 
-	body, truncated, err := readBody(raw, c.opts.MaxBody)
-	if err != nil {
-		return nil, err
+	// A response that carries no body by definition has nothing to read, and reading it means
+	// waiting on a stream that never ends. An informational status is the one that matters: a
+	// WebSocket upgrade answers 101 and then keeps the connection open, so asking for what
+	// follows the handshake hangs the scan on a request that succeeded.
+	body, truncated := []byte(nil), false
+	if raw.StatusCode >= 200 && raw.StatusCode != 204 && raw.StatusCode != 304 {
+		body, truncated, err = readBody(raw, c.opts.MaxBody)
+		if err != nil {
+			return nil, err
+		}
 	}
 	elapsed := time.Since(start)
 

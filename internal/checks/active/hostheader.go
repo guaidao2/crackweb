@@ -156,11 +156,51 @@ func echoOnlyInBody(body, header, canary string) bool {
 func prefixedByHeaderName(before, header string) bool {
 	lineStart := strings.LastIndexAny(before, "\r\n") + 1
 	line := before[lineStart:]
-	colon := strings.IndexByte(line, ':')
+	// The nearest colon, not the first one on the line: a page that dumps the request writes
+	// several values before this one, and the first colon belongs to whichever came first. What
+	// matters is the name immediately in front of the value being judged.
+	colon := strings.LastIndexByte(line, ':')
 	if colon < 0 {
 		return false
 	}
-	return strings.EqualFold(strings.TrimSpace(line[:colon]), header)
+	// A page that dumps the request writes the name its own way: PHP's $_SERVER spells it
+	// `HTTP_X_FORWARDED_HOST`, a debug page may put a label of its own in front, and the markup
+	// around it is not part of the name. Any spelling that ends in the header's name is the
+	// header's own line, and the value after it is the page quoting itself.
+	fields := strings.FieldsFunc(strings.TrimSpace(line[:colon]), func(r rune) bool {
+		switch r {
+		case ' ', '\t', '<', '>', '"', '\'', '=', '&':
+			return true
+		}
+		return false
+	})
+	if len(fields) == 0 {
+		return false
+	}
+	last := fields[len(fields)-1]
+	for _, form := range headerNameForms(header) {
+		if strings.EqualFold(last, form) {
+			return true
+		}
+	}
+	return false
+}
+
+// headerNameForms returns the spellings the same header takes on a page that dumps the request.
+//
+// The `HTTP_` form with underscores is not a curiosity: it is what PHP's `$_SERVER` calls a
+// request header, and a page built on PHP that prints its server variables writes every header
+// that way. Recognising only the name as it was sent leaves those pages looking as though they
+// used the value.
+func headerNameForms(header string) []string {
+	upper := strings.ToUpper(header)
+	underscored := "HTTP_" + strings.ReplaceAll(upper, "-", "_")
+	return []string{
+		header,
+		underscored,
+		strings.ReplaceAll(upper, "_", "-"),
+		strings.ReplaceAll(underscored, "_", "-"),
+	}
 }
 
 // Ensure httpmsg stays referenced by the clone helper above.

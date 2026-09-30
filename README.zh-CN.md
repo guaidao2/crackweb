@@ -40,7 +40,12 @@ crackweb crawl -u https://example.com --engine hybrid -o report.html
 ```sh
 crackweb scan -u "https://example.com/api/items?category=books" -o report.html
 crackweb scan -r request.txt          # 扫描从 Burp 保存下来的报文
+crackweb scan -u https://example.com/login --forms   # 并提交该页面声明的表单
 ```
+
+`--forms` 补上单 URL 扫描本来测不到的情况：真正的参数在表单里的页面。表单提交到自己的地址、
+带自己的请求体和编码，seed 请求带的任何东西都到不了那里。加上 `--forms` 后 crackweb 会读出该
+页面的表单并逐个提交，与爬虫的做法一致 —— 登录页、搜索框、上传表单因此不必爬整个站点就能测。
 
 ## 语言
 
@@ -111,6 +116,22 @@ crackweb proxy --listen 127.0.0.1:7777 --oob-http 0.0.0.0:8081 --oob-dns 0.0.0.0
 crackweb oob --domain oob.example.com      # 也可独立部署在目标能回连的主机上
 ```
 
+这个监听器只在**目标能回连本机**时才有用 —— 实验网络，或者本机有可达地址的场合。对其它目标
+（NAT 后面的笔记本、公网上的站点）payload 发得出去而回执永远到不了，所以 crackweb **不会**
+默认启动监听：不给 `--oob-http`、`--oob-dns` 或 `--oob-interactsh` 时，带外类检查会自己跳过，
+而不是发出注定收不到回应的 payload。
+
+这些目标请指向一个 [interactsh](https://github.com/projectdiscovery/interactsh) 部署 ——
+自建的，或者公共实例。回调名在该域名下解析，从任何位置都有效：
+
+```sh
+crackweb scan -u https://target.example --oob-interactsh oob.example.com
+crackweb scan -u https://target.example --oob-interactsh oob.example.com --oob-token "$TOKEN"
+```
+
+crackweb 在启动时向该部署注册，并轮询取回交互记录；部署拒绝注册时会给出提示，带外测试随即
+关闭，而不是跑在一条永远不可能送达的通道上。
+
 ## 检测能力
 
 **被动检测** —— 只分析已有的流量，可以安全地对生产环境运行。
@@ -118,6 +139,7 @@ crackweb oob --domain oob.example.com      # 也可独立部署在目标能回�
 | 检测项 | 发现什么 |
 | --- | --- |
 | `passive-security-headers` | 缺少 CSP、HSTS、X-Content-Type-Options、X-Frame-Options、Referrer-Policy、Permissions-Policy |
+| `passive-csp` | 存在 Content-Security-Policy 但被削弱（`unsafe-inline`、通配符、缺少 nonce） |
 | `passive-cookie-flags` | Cookie 缺少 Secure、HttpOnly 或 SameSite |
 | `passive-cors` | 回显 Origin 或使用通配符的 `Access-Control-Allow-Origin`，且允许携带凭据 |
 | `passive-info-disclosure` | `Server`、`X-Powered-By` 等响应头泄露版本号 |
@@ -163,12 +185,23 @@ crackweb oob --domain oob.example.com      # 也可独立部署在目标能回�
 | `pagination-bypass` | 中危 |
 | `parameter-type-bypass` | 中危 |
 | `dom-xss` | 高危（需显式开启：会在浏览器里真实加载并执行页面） |
+| `prototype-pollution` | High *（需显式开启：会在浏览器里加载页面）* |
+| `client-template-injection` | 高危（需显式开启：会在浏览器里真实加载页面） |
 | `ldap-injection` | 高危 |
 | `xpath-injection` | 高危 |
 | `odata-injection` | 高危 |
 | `graphql-introspection` | 低危 |
 | `cache-poisoning` | 高危（需显式开启：会写入共享缓存） |
 | `request-smuggling` | 高危（需显式开启） |
+| `path-override` | 高危 |
+| `ip-spoof` | 高危 |
+| `http-put` | 高危（需显式开启：会在目标上写入文件） |
+| `cors-origin` | 高危 |
+| `exposed-path` | 高危 |
+| `jsonp` | 低危 |
+| `content-type-bypass` | 中危 |
+| `referer-bypass` | 高危 |
+| `websocket-origin` | 低危 |
 
 按名字或标签筛选：`--checks sqli`、`--checks injection`、`--checks all`。
 `--passive-only` 会把代理变成纯粹观察哨，绝不主动发出任何请求。
@@ -206,6 +239,8 @@ crackweb scan -u https://staging.example.com --enable-unsafe-checks --checks all
 两种方式都会在发包前主动声明。
 
 `dom-xss` 需显式开启是出于另一个原因：它会把页面放进真实浏览器里加载，而浏览器会执行页面携带的每一个脚本 —— 包括去拉取后续数据的，以及去写数据的。对页面本身带副作用的系统而言，这已经超出了“测试它收到的那个请求”的范围。按名字选中它，或加 `--enable-unsafe-checks`，即表示同意；机器上没有浏览器时，该检查不会报任何结果，而不是去猜。
+`prototype-pollution` 同样需显式开启，它回答的是另一个问题：它加载页面，然后询问运行时——查询串里命名的那个属性是否落到了 `Object.prototype` 上。
+
 
 ```sh
 crackweb scan -u https://app.example.com/page --checks dom-xss
@@ -259,9 +294,9 @@ crackweb scan -u https://example.com --no-assume-waf # 已知无防护时，省�
 
 | 手法 | 做什么 |
 | --- | --- |
-| **统计判定，而不是秒表** | 时间盲注要三条同时成立：延迟达到请求量级的大部分、远超目标自身实测波动（3 倍四分位距）、且多次采样可复现。一次慢响应什么都证明不了。 |
+| **统计判定，而不是秒表** | 时间盲注要四条同时成立：延迟达到请求量级的大部分、**不超出**它 —— `SLEEP(3)` 不可能让一次请求花掉 5 秒，超出的部分量的是别的东西（例如另一个检查正占着连接）、远超目标自身实测波动（3 倍四分位距）、且多次采样可复现。一次慢响应什么都证明不了。 |
 | **HTTP 参数污染** | payload 单独发送被拒时，改为作为同名参数的**第二次出现**发送 —— 只读第一个取值的过滤器看不到它，而取最后一个取值的框架会执行它。 |
-| **列数探测** | UNION 两侧列数不一致，在任何数据库里都是语法错误，所以列数是靠试出来的；每一列都填入一个唯一数字，这样"注入进去的值"才能跟"回显到表单里的 payload"区分开。 |
+| **列数探测** | UNION 两侧列数不一致，在任何数据库里都是语法错误，所以列数是靠试出来的；每一列都填入一个唯一数字，这样"注入进去的值"才能跟"回显到表单里的 payload"区分开。搜索页还会把词印在正文里，剥掉 payload 也够不到，所以检查会先索取一个纯标记，量出这一页重复了它几次。 |
 | **路径规范化** | `//etc/passwd`、`/.//etc/passwd`、`/etc//passwd` —— 针对那些正确剥掉了 `../`、却把 `//` 折叠错的实现。 |
 | **二次注入** | 用一个请求把 payload 写进去，再重放**已观察到的**页面，看读回它时是否破坏了什么。比对基准是这些页面在写入**之前**的响应，所以证据是"写入造成的改变"。 |
 | **带外盲测** | 盲 SSRF、命令注入、XXE 在响应里什么都不留。每次探测植入一个唯一回调地址，证据随后从另一个监听器到达。 |

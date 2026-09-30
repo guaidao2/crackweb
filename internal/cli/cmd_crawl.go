@@ -9,27 +9,28 @@ import (
 	"github.com/guaidao2/crackweb/internal/crawl"
 	"github.com/guaidao2/crackweb/internal/httpmsg"
 	"github.com/guaidao2/crackweb/internal/i18n"
-	"github.com/guaidao2/crackweb/internal/oob"
 	"github.com/guaidao2/crackweb/internal/sitemap"
 )
 
 // crawlOptions is the parsed command line of "crackweb crawl".
 type crawlOptions struct {
 	*requestOptions
-	url         *string
-	depth       *int
-	engine      *string
-	maxPages    *int
-	scope       *[]string
-	checks      *string
-	report      *string
-	listChecks  *bool
-	noDiscovery *bool
-	allowState  *bool
-	apiDoc      *[]string
-	oobHTTP     *string
-	oobDNS      *string
-	oobDomain   *string
+	url           *string
+	depth         *int
+	engine        *string
+	maxPages      *int
+	scope         *[]string
+	checks        *string
+	report        *string
+	listChecks    *bool
+	noDiscovery   *bool
+	allowState    *bool
+	apiDoc        *[]string
+	oobHTTP       *string
+	oobDNS        *string
+	oobDomain     *string
+	oobInteractsh *string
+	oobToken      *string
 }
 
 // newCrawlCommand builds the crawler command: discovery-driven scanning, for
@@ -53,6 +54,8 @@ func newCrawlCommand() *command {
 				oobHTTP:        fs.String("oob-http", "", "", "<addr>", i18n.KeyFlagHTTPAddr),
 				oobDNS:         fs.String("oob-dns", "", "", "<addr>", i18n.KeyFlagDNSAddr),
 				oobDomain:      fs.String("oob-domain", "", "", "<host>", i18n.KeyFlagOOBDomain),
+				oobInteractsh:  fs.String("oob-interactsh", "", "", "<server>", i18n.KeyFlagOOBInteractsh),
+				oobToken:       fs.String("oob-token", "", "", "<token>", i18n.KeyFlagOOBToken),
 			}
 		},
 		runCrawl)
@@ -83,20 +86,8 @@ func runCrawl(app *App, opts *crawlOptions, _ []string) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	var oobServer *oob.Server
-	if *opts.oobHTTP != "" || *opts.oobDNS != "" {
-		oobServer = newOOB(app, oob.Options{
-			HTTPAddr: *opts.oobHTTP,
-			DNSAddr:  *opts.oobDNS,
-			Domain:   *opts.oobDomain,
-		})
-		if err := oobServer.Start(ctx); err != nil {
-			app.Warn(i18n.KeyMsgRequestError, err)
-			oobServer = nil
-		} else {
-			app.Note(i18n.KeyMsgOOBListening, oobServer.HTTPAddr(), oobServer.DNSAddr())
-		}
-	}
+	oobProvider := buildOOBProvider(ctx, app, *opts.oobHTTP, *opts.oobDNS,
+		*opts.oobDomain, *opts.oobInteractsh, *opts.oobToken)
 
 	client, err := opts.client()
 	if err != nil {
@@ -108,7 +99,7 @@ func runCrawl(app *App, opts *crawlOptions, _ []string) error {
 		return err
 	}
 
-	checkCtx, scanner, err := opts.scanContext(ctx, app, client, oobServer, selected, false)
+	checkCtx, scanner, err := opts.scanContext(ctx, app, client, oobProvider, selected, false)
 	if err != nil {
 		return err
 	}

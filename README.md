@@ -45,7 +45,14 @@ crackweb crawl -u https://example.com --engine hybrid -o report.html
 ```sh
 crackweb scan -u "https://example.com/api/items?category=books" -o report.html
 crackweb scan -r request.txt          # a capture saved from Burp
+crackweb scan -u https://example.com/login --forms   # also submit the forms the page declares
 ```
+
+`--forms` covers the case a one-URL scan otherwise misses: a page whose interesting parameters
+are in a form. A form posts to its own address with its own body and encoding, so nothing the
+seed request carries reaches it. With `--forms` crackweb reads the page's forms and submits each
+one, the same way the crawler does — which is what makes a login page, a search box or an upload
+form testable without crawling the whole site.
 
 ## Language
 
@@ -124,6 +131,25 @@ crackweb proxy --listen 127.0.0.1:7777 --oob-http 0.0.0.0:8081 --oob-dns 0.0.0.0
 crackweb oob --domain oob.example.com      # or standalone, on a host targets can reach
 ```
 
+That listener only works when the target can call back to this machine — a lab network, or a host
+with a reachable address. Against anything else (a laptop behind NAT, a target on the public
+internet) the payloads go out and the answers can never arrive, so crackweb does not start the
+listener unless you ask for one: with no `--oob-http`, `--oob-dns` or `--oob-interactsh`, the
+out-of-band checks skip themselves instead of sending payloads that could not be answered.
+
+For those targets, point crackweb at an [interactsh](https://github.com/projectdiscovery/interactsh)
+deployment — your own, or a public one. The callback names resolve under its domain, so they work
+from anywhere:
+
+```sh
+crackweb scan -u https://target.example --oob-interactsh oob.example.com
+crackweb scan -u https://target.example --oob-interactsh oob.example.com --oob-token "$TOKEN"
+```
+
+crackweb registers with the deployment at start-up and polls it for interactions; a deployment that
+refuses the registration is reported and out-of-band testing stays off rather than running on a
+channel that can never deliver.
+
 ## Checks
 
 **Passive** — analyse traffic crackweb already has; safe to run against production.
@@ -131,6 +157,7 @@ crackweb oob --domain oob.example.com      # or standalone, on a host targets ca
 | Check | Finds |
 | --- | --- |
 | `passive-security-headers` | Missing CSP, HSTS, X-Content-Type-Options, X-Frame-Options, Referrer-Policy, Permissions-Policy |
+| `passive-csp` | Content-Security-Policy present but weakened (`unsafe-inline`, wildcards, missing nonce) |
 | `passive-cookie-flags` | Cookies without Secure, HttpOnly or SameSite |
 | `passive-cors` | Reflected or wildcard `Access-Control-Allow-Origin`, with credentials |
 | `passive-info-disclosure` | `Server`, `X-Powered-By` and friends leaking versions |
@@ -176,12 +203,23 @@ crackweb oob --domain oob.example.com      # or standalone, on a host targets ca
 | `pagination-bypass` | Medium |
 | `parameter-type-bypass` | Medium |
 | `dom-xss` | High *(opt-in: runs the page in a browser)* |
+| `prototype-pollution` | High *(opt-in: runs the page in a browser)* |
+| `client-template-injection` | High *(opt-in: runs the page in a browser)* |
 | `ldap-injection` | High |
 | `xpath-injection` | High |
 | `odata-injection` | High |
 | `graphql-introspection` | Low |
 | `cache-poisoning` | High *(opt-in: writes into a shared cache)* |
 | `request-smuggling` | High *(opt-in)* |
+| `path-override` | High |
+| `ip-spoof` | High |
+| `http-put` | High *(opt-in: stores a file on the target)* |
+| `cors-origin` | High |
+| `exposed-path` | High |
+| `jsonp` | Low |
+| `content-type-bypass` | Medium |
+| `referer-bypass` | High |
+| `websocket-origin` | Low |
 
 Select checks by name or by tag: `--checks sqli`, `--checks injection`, `--checks all`.
 `--passive-only` turns the proxy into a pure observation post that never sends a request
@@ -224,6 +262,10 @@ browser runs every script the page carries — the ones that fetch further data 
 that write it included. On a target whose pages have side effects, that is more than
 testing the request it was given. Naming it, or passing `--enable-unsafe-checks`, is the
 consent; without a browser installed the check reports nothing rather than guessing.
+`prototype-pollution` is opt-in for the same reason, and answers a different question: it
+loads the page and asks its runtime whether a property named in the query string reached
+`Object.prototype`.
+
 
 ```sh
 crackweb scan -u https://app.example.com/page --checks dom-xss
@@ -286,9 +328,9 @@ from a fuzzer:
 
 | Technique | What it does |
 | --- | --- |
-| **Statistics, not a stopwatch** | A time-based finding requires three conditions together: the delay reaches most of what the payload asked for, it stands clear of the target's own measured variation (3× the interquartile range), and it reproduces across samples. One slow response proves nothing. |
+| **Statistics, not a stopwatch** | A time-based finding requires four conditions together: the delay reaches most of what the payload asked for, it does **not** run past it — a three-second sleep cannot make a request take five, so a measurement that overshoots is measuring something else, such as another check holding a connection — it stands clear of the target's own measured variation (3× the interquartile range), and it reproduces across samples. One slow response proves nothing. |
 | **HTTP parameter pollution** | When a payload is refused on its own, it is sent again as a *second* occurrence of the same parameter — a filter reading the first one never sees it, while a framework resolving the last one acts on it. |
-| **Column counting** | A `UNION` whose arms differ in width is a syntax error in every database, so the arm count is found by trial — and each column is filled with a unique number, so the injected values can be told apart from the payload being echoed back into the form. |
+| **Column counting** | A `UNION` whose arms differ in width is a syntax error in every database, so the arm count is found by trial — and each column is filled with a unique number, so the injected values can be told apart from the payload being echoed back into the form. A search page also prints the term in prose, where removing the payload does not reach it, so the check first asks for the bare marker and counts how many times this page repeats it. |
 | **Path normalisation** | `//etc/passwd`, `/.//etc/passwd`, `/etc//passwd` — for implementations that strip `../` correctly and still collapse `//` wrongly. |
 | **Second-order injection** | A payload is written through one request and the *already-observed* pages are replayed to see whether reading it back broke something. Compared against what those pages returned **before** the write, so the evidence is the change the write caused. |
 | **Blind testing by callback** | A blind SSRF, command injection or XXE leaves nothing in the response. Each attempt plants a unique callback address and the proof arrives later, on a separate listener. |

@@ -11,6 +11,7 @@ package browser
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"runtime"
 	"strings"
@@ -151,6 +152,44 @@ func (p *Probe) Probe(ctx context.Context, target, marker string) (bool, string,
 // jsString renders a value as a JavaScript string literal. The marker is generated, not
 // received, but a probe that interpolates into script without quoting is the very mistake
 // it is testing for.
+// Eval loads a target and returns the value of a JavaScript expression in that page.
+//
+// Like Probe, a load that reports an error may still have run the script that matters, so
+// the expression is evaluated either way. The result is rendered with fmt.Sprint because an
+// expression is free to answer with a number, a boolean or nothing at all.
+func (p *Probe) Eval(ctx context.Context, target, expression string) (string, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	if expression == "" {
+		return "", errors.New("browser: eval needs an expression")
+	}
+	allocCtx, err := p.browser()
+	if err != nil {
+		return "", err
+	}
+
+	tabCtx, cancelTab := chromedp.NewContext(allocCtx)
+	defer cancelTab()
+
+	loadCtx, cancelLoad := context.WithTimeout(tabCtx, p.timeout)
+	defer cancelLoad()
+
+	_ = chromedp.Run(loadCtx,
+		chromedp.Navigate(target),
+		chromedp.Sleep(p.settle),
+	)
+
+	var raw any
+	if err := chromedp.Run(loadCtx, chromedp.Evaluate(expression, &raw)); err != nil {
+		return "", err
+	}
+	if raw == nil {
+		return "", nil
+	}
+	return fmt.Sprint(raw), nil
+}
+
 func jsString(value string) string {
 	var b strings.Builder
 	b.WriteByte('\'')

@@ -148,3 +148,77 @@ func TestDescribeContextNamesThePlace(t *testing.T) {
 		})
 	}
 }
+
+// TestExecutableContextOnAttributeClosure pins the case a real target exposed:
+// a page that escapes `<`, `>` and `"` but not `'`, so the only way in is to
+// close the attribute the value landed in and add one of your own.
+//
+// The payload carries no markup characters at all, which is exactly why the old
+// judgement missed it: it looked for `<`/`>` before considering that a leading
+// quote ends the attribute value and turns the rest into tag attributes.
+func TestExecutableContextOnAttributeClosure(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		body   string
+		marker string
+		want   bool
+	}{
+		{
+			name:   "quote closes the value, event handler follows",
+			body:   `<html><body><input name=keyword value='' autofocus onfocus=alert(1) x=''></body></html>`,
+			marker: `' autofocus onfocus=alert(1) x='`,
+			want:   true,
+		},
+		{
+			name:   "quote plus slash-separated attribute",
+			body:   `<html><body><input name=keyword value=''autofocus/onfocus=alert(1)'></body></html>`,
+			marker: `'autofocus/onfocus=alert(1)`,
+			want:   true,
+		},
+		{
+			name:   "same payload in a text node is inert",
+			body:   `<html><body><p>' autofocus onfocus=alert(1) x='</p></body></html>`,
+			marker: `' autofocus onfocus=alert(1) x='`,
+			want:   false,
+		},
+		{
+			name:   "javascript: url in an ordinary attribute stays inert",
+			body:   `<html><body><input name=q value="javascript:alert(1)"></body></html>`,
+			marker: `javascript:alert(1)`,
+			want:   false,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := executableContext(tc.body, tc.marker); got != tc.want {
+				t.Errorf("executableContext(%s) = %v, want %v", tc.name, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestExecutableContextSeesEveryEcho is the second half of the same target's
+// lesson: the page echoed the value twice — once in the "no results for …" prose
+// and again in the form field it came from — and only the second echo executes.
+// Judging the first occurrence alone reports that payload as inert.
+func TestExecutableContextSeesEveryEcho(t *testing.T) {
+	const marker = `' onmouseover='alert(1)`
+	body := `<html><body><h2>no results for ` + marker + `</h2>` +
+		`<form><input name=keyword value='` + marker + `'></form></body></html>`
+
+	if !executableContext(body, marker) {
+		t.Error("a payload that executes in its second echo was judged inert")
+	}
+	if got := describeContext(body, marker); got != "in an attribute, after closing it" {
+		t.Errorf("describeContext = %q, want the executing occurrence", got)
+	}
+
+	// The same page with only the prose echo executes nothing, and the evidence
+	// still has to say where the value landed.
+	proseOnly := `<html><body><h2>no results for ` + marker + `</h2></body></html>`
+	if executableContext(proseOnly, marker) {
+		t.Error("a payload echoed only into prose was judged executable")
+	}
+	if got := describeContext(proseOnly, marker); got != "in the document body" {
+		t.Errorf("describeContext = %q, want the prose location", got)
+	}
+}

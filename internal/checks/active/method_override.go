@@ -59,7 +59,7 @@ func (methodOverride) DescriptionKey() i18n.Key   { return i18n.KeyCheckMethodOv
 func (methodOverride) RemediationKey() i18n.Key   { return i18n.KeyCheckMethodOverrideFix }
 func (methodOverride) Severity() finding.Severity { return finding.SeverityMedium }
 func (methodOverride) Tags() []string {
-	return []string{"active", "authorization", "misconfiguration"}
+	return []string{"active", "authorization", "access-control", "misconfiguration"}
 }
 func (methodOverride) Passive() bool { return false }
 

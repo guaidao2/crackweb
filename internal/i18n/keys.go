@@ -64,12 +64,19 @@ const (
 	KeyFlagRaw        Key = "scan.flag.raw"
 	KeyFlagChecks     Key = "scan.flag.checks"
 	KeyFlagScanOutput Key = "scan.flag.output"
+	// KeyFlagScanForms also submits the forms the scanned page declares.
+	KeyFlagScanForms Key = "scan.flag.forms"
 
 	// oob options.
-	KeyFlagDNSAddr   Key = "oob.flag.dns"
-	KeyFlagHTTPAddr  Key = "oob.flag.http"
+	KeyFlagDNSAddr  Key = "oob.flag.dns"
+	KeyFlagHTTPAddr Key = "oob.flag.http"
+	// KeyFlagOOBToken is the optional shared secret: it correlates callbacks with the
+	// requests that triggered them, and is also the authorization value an interactsh
+	// server may ask for.
 	KeyFlagOOBToken  Key = "oob.flag.token"
 	KeyFlagOOBDomain Key = "oob.flag.domain"
+	// KeyFlagOOBInteractsh names a deployment that collects interactions elsewhere.
+	KeyFlagOOBInteractsh Key = "oob.flag.interactsh"
 
 	// ca options.
 	KeyFlagOutDir Key = "ca.flag.out"
@@ -258,6 +265,54 @@ const (
 	KeyCheckDOMXSSTitle Key = "check.dom-xss.title"
 	KeyCheckDOMXSSDesc  Key = "check.dom-xss.description"
 	KeyCheckDOMXSSFix   Key = "check.dom-xss.remediation"
+	// Prototype pollution: a query string that reaches an object merge.
+	// Client-side template injection: a URL value that reaches a template compiler.
+	// Content-Security-Policy that is present but ineffective.
+	// Path override through a proxy header.
+	// Spoofed client address against a restricted endpoint.
+	// Write methods stored under the request's own path.
+	// A CORS policy that names the origin it was asked with.
+	// Files a web server serves that were never meant to be served.
+	// An endpoint that wraps its response in a caller-supplied callback name.
+	// A guard attached to one Content-Type.
+	// A guard that trusts the Referer header.
+	// A WebSocket handshake that completes for any origin.
+	KeyCheckWebSocketTitle          Key = "check.websocket-origin.title"
+	KeyCheckWebSocketDesc           Key = "check.websocket-origin.description"
+	KeyCheckWebSocketFix            Key = "check.websocket-origin.remediation"
+	KeyCheckRefererBypassTitle      Key = "check.referer-bypass.title"
+	KeyCheckRefererBypassDesc       Key = "check.referer-bypass.description"
+	KeyCheckRefererBypassFix        Key = "check.referer-bypass.remediation"
+	KeyCheckContentTypeBypassTitle  Key = "check.content-type-bypass.title"
+	KeyCheckContentTypeBypassDesc   Key = "check.content-type-bypass.description"
+	KeyCheckContentTypeBypassFix    Key = "check.content-type-bypass.remediation"
+	KeyCheckJSONPTitle              Key = "check.jsonp.title"
+	KeyCheckJSONPDesc               Key = "check.jsonp.description"
+	KeyCheckJSONPFix                Key = "check.jsonp.remediation"
+	KeyCheckExposedPathTitle        Key = "check.exposed-path.title"
+	KeyCheckExposedPathDesc         Key = "check.exposed-path.description"
+	KeyCheckExposedPathFix          Key = "check.exposed-path.remediation"
+	KeyCheckCORSOriginTitle         Key = "check.cors-origin.title"
+	KeyCheckCORSOriginDesc          Key = "check.cors-origin.description"
+	KeyCheckCORSOriginFix           Key = "check.cors-origin.remediation"
+	KeyCheckHTTPPutTitle            Key = "check.http-put.title"
+	KeyCheckHTTPPutDesc             Key = "check.http-put.description"
+	KeyCheckHTTPPutFix              Key = "check.http-put.remediation"
+	KeyCheckIPSpoofTitle            Key = "check.ip-spoof.title"
+	KeyCheckIPSpoofDesc             Key = "check.ip-spoof.description"
+	KeyCheckIPSpoofFix              Key = "check.ip-spoof.remediation"
+	KeyCheckPathOverrideTitle       Key = "check.path-override.title"
+	KeyCheckPathOverrideDesc        Key = "check.path-override.description"
+	KeyCheckPathOverrideFix         Key = "check.path-override.remediation"
+	KeyCheckCSPTitle                Key = "check.passive-csp.title"
+	KeyCheckCSPDesc                 Key = "check.passive-csp.description"
+	KeyCheckCSPFix                  Key = "check.passive-csp.remediation"
+	KeyCheckCSTITitle               Key = "check.client-template-injection.title"
+	KeyCheckCSTIDesc                Key = "check.client-template-injection.description"
+	KeyCheckCSTIFix                 Key = "check.client-template-injection.remediation"
+	KeyCheckPrototypePollutionTitle Key = "check.prototype-pollution.title"
+	KeyCheckPrototypePollutionDesc  Key = "check.prototype-pollution.description"
+	KeyCheckPrototypePollutionFix   Key = "check.prototype-pollution.remediation"
 
 	// Active check: a value reaching an LDAP filter.
 	KeyCheckLDAPTitle Key = "check.ldap-injection.title"
@@ -468,6 +523,7 @@ const (
 	KeyMsgScanFinished        Key = "msg.scan-finished"
 	KeyMsgNoFindings          Key = "msg.no-findings"
 	KeyMsgOOBListening        Key = "msg.oob-listening"
+	KeyMsgOOBInteractsh       Key = "msg.oob-interactsh"
 	KeyMsgUnknownChecks       Key = "msg.unknown-checks"
 	KeyMsgChecksLoaded        Key = "msg.checks-loaded"
 	KeyMsgRequestError        Key = "msg.request-error"

@@ -9,26 +9,31 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/guaidao2/crackweb/internal/checks"
+	"github.com/guaidao2/crackweb/internal/crawl"
 	"github.com/guaidao2/crackweb/internal/httpmsg"
 	"github.com/guaidao2/crackweb/internal/i18n"
-	"github.com/guaidao2/crackweb/internal/oob"
+	"github.com/guaidao2/crackweb/internal/scan"
 	"github.com/guaidao2/crackweb/internal/sitemap"
 )
 
 // scanOptions is the parsed command line of "crackweb scan".
 type scanOptions struct {
 	*requestOptions
-	url        *string
-	raw        *string
-	method     *string
-	data       *string
-	header     *[]string
-	checks     *string
-	output     *string
-	listChecks *bool
-	oobHTTP    *string
-	oobDNS     *string
-	oobDomain  *string
+	url           *string
+	raw           *string
+	method        *string
+	data          *string
+	header        *[]string
+	checks        *string
+	output        *string
+	listChecks    *bool
+	forms         *bool
+	oobHTTP       *string
+	oobDNS        *string
+	oobDomain     *string
+	oobInteractsh *string
+	oobToken      *string
 	// fs is kept so the command can tell "not given" from "given the default".
 	fs *FlagSet
 }
@@ -48,9 +53,12 @@ func newScanCommand() *command {
 				checks:         fs.String("checks", "", "all", "<list>", i18n.KeyFlagChecks),
 				output:         fs.String("output", "o", "", "<file>", i18n.KeyFlagScanOutput),
 				listChecks:     fs.Bool("list-checks", "", i18n.KeyFlagListChecks),
+				forms:          fs.Bool("forms", "", i18n.KeyFlagScanForms),
 				oobHTTP:        fs.String("oob-http", "", "", "<addr>", i18n.KeyFlagHTTPAddr),
 				oobDNS:         fs.String("oob-dns", "", "", "<addr>", i18n.KeyFlagDNSAddr),
 				oobDomain:      fs.String("oob-domain", "", "", "<host>", i18n.KeyFlagOOBDomain),
+				oobInteractsh:  fs.String("oob-interactsh", "", "", "<server>", i18n.KeyFlagOOBInteractsh),
+				oobToken:       fs.String("oob-token", "", "", "<token>", i18n.KeyFlagOOBToken),
 			}
 			opts.fs = fs
 			return opts
@@ -73,20 +81,8 @@ func runScan(app *App, opts *scanOptions, _ []string) error {
 		return err
 	}
 
-	var oobServer *oob.Server
-	if *opts.oobHTTP != "" || *opts.oobDNS != "" {
-		oobServer = newOOB(app, oob.Options{
-			HTTPAddr: *opts.oobHTTP,
-			DNSAddr:  *opts.oobDNS,
-			Domain:   *opts.oobDomain,
-		})
-		if err := oobServer.Start(ctx); err != nil {
-			app.Warn(i18n.KeyMsgRequestError, err)
-			oobServer = nil
-		} else {
-			app.Note(i18n.KeyMsgOOBListening, oobServer.HTTPAddr(), oobServer.DNSAddr())
-		}
-	}
+	oobProvider := buildOOBProvider(ctx, app, *opts.oobHTTP, *opts.oobDNS,
+		*opts.oobDomain, *opts.oobInteractsh, *opts.oobToken)
 
 	client, err := opts.client()
 	if err != nil {
@@ -98,7 +94,7 @@ func runScan(app *App, opts *scanOptions, _ []string) error {
 		return err
 	}
 
-	checkCtx, scanner, err := opts.scanContext(ctx, app, client, oobServer, selected, false)
+	checkCtx, scanner, err := opts.scanContext(ctx, app, client, oobProvider, selected, false)
 	if err != nil {
 		return err
 	}
@@ -121,6 +117,15 @@ func runScan(app *App, opts *scanOptions, _ []string) error {
 	store.Add(request, resp)
 
 	scanner.Submit(request, resp)
+
+	// A page that declares a form is only testable through the request that form produces, and
+	// a one-shot scan never gets there by itself: the form's action is a different URL, with a
+	// body and an encoding the seed does not carry. --forms asks for that page's forms and
+	// submits each one, exactly as the crawler would.
+	if *opts.forms {
+		submitForms(ctx, checkCtx, scanner, store, request, resp)
+	}
+
 	scanner.Wait()
 
 	findings := scanner.Findings()
@@ -188,4 +193,30 @@ func humanDurationText(d time.Duration) string {
 		return "0s"
 	}
 	return d.Round(time.Millisecond).String()
+}
+
+// submitForms submits every form the scanned page declares and hands each exchange to the
+// scanner, so the checks see the parameters a user would actually send.
+//
+// Failing to parse the page is not an error: a response that carries no HTML has no forms, and
+// the scan it was asked for has already happened.
+func submitForms(ctx context.Context, checkCtx *checks.Context, scanner *scan.Scanner,
+	store *sitemap.Store, request *httpmsg.Request, resp *httpmsg.Response) {
+	if request.URL == nil || resp == nil || len(resp.Body) == 0 {
+		return
+	}
+	page, err := crawl.Parse(string(resp.Body), request.URL, false)
+	if err != nil || len(page.Forms) == 0 {
+		return
+	}
+	for _, form := range page.Forms {
+		for _, submitted := range crawl.FormRequests(form, request.URL) {
+			formResp, err := checkCtx.Do(ctx, submitted)
+			if err != nil || formResp == nil {
+				continue
+			}
+			store.Add(submitted, formResp)
+			scanner.Submit(submitted, formResp)
+		}
+	}
 }

@@ -89,7 +89,11 @@ type Context struct {
 	// to serialise itself. A nil value means nothing is watched.
 	OnRequest func(*httpmsg.Request)
 
-	mu       sync.Mutex
+	mu sync.Mutex
+
+	// hostOnce remembers which host-level questions have already been asked, so a check whose
+	// subject is the host answers once however many of its pages the run reaches.
+	hostOnce map[string]bool
 	requests int
 	failures []string
 }
@@ -218,6 +222,34 @@ func withoutAuth(req *httpmsg.Request) *httpmsg.Request {
 	return clone
 }
 
+// HostOnce reports whether a host-level question is being asked for the first time.
+//
+// A check whose subject is the host rather than a page — which paths a server publishes, what a
+// socket accepts, which addresses it answers on — gives the same answer whichever page it was
+// dispatched against, and a crawl hands it the same host once per discovered URL. Asking again
+// spends the whole budget repeating one question, and the answer cannot have changed between
+// two pages of the same site.
+//
+// The key names the question, so one host can be asked several different things exactly once
+// each. The first caller for a given host and key gets true and should do the work; every later
+// caller gets false and should do nothing.
+func (c *Context) HostOnce(host, key string) bool {
+	if host == "" || key == "" {
+		return true
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.hostOnce == nil {
+		c.hostOnce = map[string]bool{}
+	}
+	composite := host + "\x00" + key
+	if c.hostOnce[composite] {
+		return false
+	}
+	c.hostOnce[composite] = true
+	return true
+}
+
 // ErrNoParameter is returned when a check tries to inject into a target that
 // has no parameter.
 var ErrNoParameter = errors.New("checks: target has no parameter to inject into")
@@ -252,6 +284,24 @@ func (c *Context) InjectEncodedTimed(ctx context.Context, t *Target, payload str
 		return nil, nil, err
 	}
 	mutated.Timeout = timeout
+	resp, err := c.Do(ctx, mutated)
+	return mutated, resp, err
+}
+
+// InjectNamed sends the request with the parameter renamed as well as its value
+// replaced. It is the transport half of parameter-name injection: `user[$ne]` is
+// a different parameter to a document-oriented framework than `user` is, and the
+// parser — not the check — decides what that difference means. The name is
+// encoded by the same rule the value is, so the brackets and the dollar sign
+// arrive as the bytes a form would have sent.
+func (c *Context) InjectNamed(ctx context.Context, t *Target, name, payload string) (*httpmsg.Request, *httpmsg.Response, error) {
+	if t == nil || t.Request == nil || t.Param == nil {
+		return nil, nil, ErrNoParameter
+	}
+	mutated, err := MutateNamed(t.Request, *t.Param, name, payload, c.Encode)
+	if err != nil {
+		return nil, nil, err
+	}
 	resp, err := c.Do(ctx, mutated)
 	return mutated, resp, err
 }
@@ -361,6 +411,67 @@ func Mutate(req *httpmsg.Request, param httpmsg.Param, payload string, enc Encod
 
 // replacePair rewrites one "name=value" pair inside an ampersand-separated
 // list, matching on the raw name and skipping earlier namesakes.
+// MutateNamed rewrites the parameter's name and value together.
+//
+// The rename is not cosmetic: to a document-oriented framework the name is the
+// query, so a check that can only replace values cannot express the operator form
+// at all. Only the locations whose name is written on the wire are supported —
+// a name inside a JSON document is a field path, and renaming it is a different
+// operation with its own rules.
+func MutateNamed(req *httpmsg.Request, param httpmsg.Param, name, payload string, enc Encoding) (*httpmsg.Request, error) {
+	if req == nil {
+		return nil, errors.New("checks: cannot mutate a nil request")
+	}
+	if param.Wrapper != httpmsg.WrapNone {
+		return nil, errors.New("checks: cannot rename a nested parameter")
+	}
+	rawName := encodeValue(name, enc)
+	rawValue := encodeValue(payload, enc)
+
+	out := req.Clone()
+	switch param.In {
+	case httpmsg.LocQuery:
+		if out.URL == nil {
+			return nil, errors.New("checks: request has no URL")
+		}
+		out.URL.RawQuery = replacePairNamed(out.URL.RawQuery, param, rawName, rawValue)
+
+	case httpmsg.LocBody:
+		body := replacePairNamed(string(out.Body), param, rawName, rawValue)
+		out.Body = []byte(body)
+		out.Header.Set("Content-Length", strconv.Itoa(len(body)))
+
+	case httpmsg.LocCookie:
+		cookie := replacePairNamed(out.Header.Get("Cookie"), param, rawName, rawValue)
+		out.Header.Set("Cookie", cookie)
+
+	default:
+		return nil, errors.New("checks: unsupported rename location " + string(param.In))
+	}
+	return out, nil
+}
+
+// replacePairNamed is replacePair with a new name as well as a new value.
+func replacePairNamed(raw string, param httpmsg.Param, newRawName, newRawValue string) string {
+	if raw == "" {
+		return newRawName + "=" + newRawValue
+	}
+	parts := strings.Split(raw, "&")
+	seen := 0
+	for i, part := range parts {
+		name, _, _ := strings.Cut(part, "=")
+		if name != param.RawName {
+			continue
+		}
+		if seen == param.Occurrence {
+			parts[i] = newRawName + "=" + newRawValue
+			return strings.Join(parts, "&")
+		}
+		seen++
+	}
+	return raw + "&" + newRawName + "=" + newRawValue
+}
+
 func replacePair(raw string, param httpmsg.Param, newRawValue string) string {
 	if raw == "" {
 		return param.RawName + "=" + newRawValue

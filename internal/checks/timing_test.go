@@ -69,6 +69,23 @@ func TestJudgeTimingAcceptsARealDelay(t *testing.T) {
 	}
 }
 
+// TestJudgeTimingRejectsAnOvershoot: a payload that asked for three seconds cannot have
+// produced five. The extra time was spent waiting for something else — another check holding a
+// connection on the same target, a database of its own sleeping — and a verdict that accepts it
+// reports the target's load instead of the injection.
+func TestJudgeTimingRejectsAnOvershoot(t *testing.T) {
+	baseline := sample(1, 1, 1, 1, 1)
+	injected := sample(4800, 4824, 4850, 4870, 4900)
+
+	verdict := JudgeTiming(baseline, injected, 3*time.Second)
+	if verdict.Delayed {
+		t.Errorf("a delay larger than the payload could have produced was accepted: %s", verdict.Reason)
+	}
+	if verdict.Reason == "" {
+		t.Error("no reason was recorded")
+	}
+}
+
 // TestJudgeTimingRejectsNoise: a target whose responses wander must not be
 // reported on the strength of one slow answer.
 func TestJudgeTimingRejectsNoise(t *testing.T) {

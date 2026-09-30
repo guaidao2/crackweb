@@ -65,11 +65,13 @@ var english = map[Key]string{
 	KeyFlagRaw:        "Read the request to scan from a raw HTTP file, e.g. saved from Burp.",
 	KeyFlagChecks:     "Comma-separated check names or tags, or 'all'. Checks marked opt-in in --list-checks are never pulled in by 'all'.",
 	KeyFlagScanOutput: "Report path; the format follows the extension (.html, .json, .sarif, .md).",
+	KeyFlagScanForms:  "Also submit the forms the scanned page declares, and test what each one sends. A form posts to its own address with its own body, which a scan of one URL never reaches on its own.",
 
-	KeyFlagDNSAddr:   "Listen address for the DNS interaction server, e.g. 0.0.0.0:5353.",
-	KeyFlagHTTPAddr:  "Listen address for the HTTP interaction server, e.g. 0.0.0.0:8081.",
-	KeyFlagOOBToken:  "Shared secret used to correlate a callback with the request that triggered it.",
-	KeyFlagOOBDomain: "Base domain pointing at this server, when running behind a delegation.",
+	KeyFlagDNSAddr:       "Listen address for the DNS interaction server, e.g. 0.0.0.0:5353.",
+	KeyFlagHTTPAddr:      "Listen address for the HTTP interaction server, e.g. 0.0.0.0:8081.",
+	KeyFlagOOBToken:      "Optional shared secret: it correlates a callback with the request that triggered it, and is also the authorization value an interactsh server may require.",
+	KeyFlagOOBDomain:     "Base domain pointing at this server, when running behind a delegation.",
+	KeyFlagOOBInteractsh: "An interactsh server to collect interactions at, e.g. oob.example.com; callback names resolve under it, so it works when the target cannot reach this machine. Without it out-of-band testing is off.",
 
 	KeyFlagOutDir: "Directory to create or export CA material into.",
 	KeyFlagForce:  "Overwrite existing CA material.",
@@ -335,6 +337,128 @@ var english = map[Key]string{
 	KeyEvidenceTypeBypass: "the value %q was refused with %d, while the same value written as " +
 		"%q was answered with %d",
 
+	KeyCheckWebSocketTitle: "WebSocket handshake completed for any origin",
+	KeyCheckWebSocketDesc: "The endpoint accepted a WebSocket handshake from an origin it does " +
+		"not serve, with the caller's session attached. A WebSocket handshake is not subject to " +
+		"the same-origin policy, so a page on any site can open this socket with the visitor's " +
+		"credentials and read what it carries.",
+	KeyCheckWebSocketFix: "Check the Origin header on the handshake against a list of the " +
+		"origins that may connect, and refuse the rest before upgrading. Requiring a token in " +
+		"the first message is a second option, but the origin is the check the browser cannot " +
+		"be talked out of sending.",
+	KeyCheckRefererBypassTitle: "Request protection resting on the Referer header",
+	KeyCheckRefererBypassDesc: "With the request sent the way it is normally sent, a token the " +
+		"server cannot have issued was refused. With the same forged token and the Referer " +
+		"header removed — or naming another site — the request was accepted. The browser may " +
+		"omit that header, and a page on another site sends its own address, so a guard that " +
+		"only holds when the header is present and correct does not hold.",
+	KeyCheckRefererBypassFix: "Protect state-changing requests with a token the caller has to " +
+		"obtain from the application, and check it on every path that changes something. " +
+		"Referer and Origin are supplementary signals at best: use them to reject, never to " +
+		"permit on their own.",
+	KeyCheckContentTypeBypassTitle: "Request protection attached to one Content-Type",
+	KeyCheckContentTypeBypassDesc: "With the request sent the way it is normally sent, a token " +
+		"the server cannot have issued was refused. With the body unchanged and a different " +
+		"Content-Type, the same request was accepted — the guard lives in one branch, and a " +
+		"caller picks the branch by labelling the body.",
+	KeyCheckContentTypeBypassFix: "Check the token before dispatching on the body's type, or " +
+		"reject any type the endpoint does not explicitly accept. A guard written inside one " +
+		"branch protects that branch only.",
+	KeyCheckJSONPTitle: "Response wrapped in a caller-supplied callback name",
+	KeyCheckJSONPDesc: "The endpoint wrapped its response in the callback name the request " +
+		"asked for, which is what a JSONP interface does: it can be loaded as a script by any " +
+		"site, and the value it returns is read by that site. Whether that matters depends on " +
+		"what the endpoint serves — an endpoint returning a session token this way is a " +
+		"cross-site read of it.",
+	KeyCheckJSONPFix: "Serve data under the same-origin policy and let a client send " +
+		"credentials explicitly: use CORS with an allow-list rather than a callback, or if a " +
+		"callback has to be supported, verify both the callback name and the caller's origin " +
+		"against a list.",
+	KeyCheckExposedPathTitle: "File served that was never meant to be served",
+	KeyCheckExposedPathDesc: "A request for a well-known path that nothing links to returned a " +
+		"file with the contents of one: an environment file with credentials in it, a git " +
+		"directory with the whole history, a database dump, a configuration backup, a status " +
+		"page. These are not reachable by crawling — they are found by asking for them by name, " +
+		"which is exactly what an attacker does first.",
+	KeyCheckExposedPathFix: "Serve only what the application needs: keep these files outside " +
+		"the document root, deny them by name in the server configuration as a backstop, and " +
+		"stop deploying backups and version-control metadata with the code.",
+	KeyCheckCORSOriginTitle: "Cross-origin policy that trusts the origin it is given",
+	KeyCheckCORSOriginDesc: "The response named the origin the request carried in " +
+		"Access-Control-Allow-Origin, for an origin no correct configuration would accept. That " +
+		"grant is what lets another site read this site's responses in a visitor's browser; with " +
+		"Access-Control-Allow-Credentials it lets any site do so with the visitor's own " +
+		"credentials attached. It usually comes from a hand-written comparison — a host name " +
+		"matched as a prefix or a suffix, a scheme not compared, or `null` allowed because " +
+		"sandboxed frames send it.",
+	KeyCheckCORSOriginFix: "Compare the whole origin against a list, scheme included, and never " +
+		"build it from the request. If several origins are needed, check each one in full; " +
+		"`null` is not an origin to allow. Allow credentials only where they are required.",
+	KeyCheckHTTPPutTitle: "Files written through the PUT method",
+	KeyCheckHTTPPutDesc: "The server stored the body of a PUT request under the path that " +
+		"request named, and served it back from the same address. That is an upload endpoint " +
+		"nobody configured on purpose — a static host, a build output directory, a " +
+		"half-configured WebDAV handler — and the caller chooses the file name, which means the " +
+		"caller chooses the extension the server will run.",
+	KeyCheckHTTPPutFix: "Refuse write methods at the server for anything that is not a " +
+		"deliberate upload endpoint: disable WebDAV, and where a PUT is wanted, restrict it to " +
+		"an authenticated path whose contents are never executed.",
+	KeyCheckIPSpoofTitle: "Restricted endpoint opened by a spoofed client address",
+	KeyCheckIPSpoofDesc: "The endpoint refused the request, and answered it once a header " +
+		"naming a loopback or private address was added. That means the restriction is applied " +
+		"to the address the caller claims rather than the one it connected from — and a claimed " +
+		"address is one anybody can write. Headers like X-Forwarded-For are set by a front end " +
+		"and are only worth trusting when it is known to have set them; an application reachable " +
+		"directly cannot tell the difference.",
+	KeyCheckIPSpoofFix: "Take the client address from the connection, not from a request " +
+		"header. Where a proxy is in front, have it overwrite the header rather than append to " +
+		"it, restrict the origin to the proxy's addresses, and make the application refuse " +
+		"requests that did not come from it.",
+	KeyCheckPathOverrideTitle: "Request path decided by a header",
+	KeyCheckPathOverrideDesc: "A request header (X-Original-URL, X-Rewrite-URL or similar) " +
+		"decided which path the application handled: asking for a path that does not exist " +
+		"returned the response for another one. The header exists for deployments where a " +
+		"proxy routes on the URL and passes the intended path along, and it is only safe while " +
+		"the backend insists the request came through that proxy. When it does not, the access " +
+		"control the proxy performs applies to one path while the application serves another.",
+	KeyCheckPathOverrideFix: "Stop honouring path headers from the request, or have the edge " +
+		"strip them before forwarding, and make the application reachable only through the " +
+		"proxy — so a request that bypasses it cannot arrive at all.",
+	KeyCheckCSPTitle: "Content-Security-Policy that does not restrict script",
+	KeyCheckCSPDesc: "A Content-Security-Policy is sent, and it permits what the policy " +
+		"exists to stop: inline script (`'unsafe-inline'`), dynamic evaluation " +
+		"(`'unsafe-eval'`), any origin (`*`), or `data:` as a script source. The header being " +
+		"present is what makes this easy to miss — a policy that allows inline script gives " +
+		"no protection against the injected `<script>` it is meant to be the second line of " +
+		"defence against. A policy sent only as `Content-Security-Policy-Report-Only` is not " +
+		"enforced at all.",
+	KeyCheckCSPFix: "Remove `'unsafe-inline'` and `'unsafe-eval'` from the script directive and " +
+		"move the inline code into files, or keep it and pin it with a per-response nonce " +
+		"(`'nonce-…'`) — a nonce makes the browser ignore `'unsafe-inline'`, so a policy that " +
+		"already has one is doing better than it looks. Name the origins you need rather than " +
+		"`*`, and send the policy as Content-Security-Policy rather than Report-Only once the " +
+		"reports are quiet.",
+	KeyCheckCSTITitle: "Client-side template injection",
+	KeyCheckCSTIDesc: "A value from the address was handed to a template compiler in the " +
+		"browser, and the compiler evaluated it as an expression. The server returns the same " +
+		"bytes either way, so this is invisible to anything that reads responses: what changes " +
+		"is what the page renders. It matters because the same input class that evaluates " +
+		"arithmetic carries code in the compiler's own syntax, and a page that compiles its " +
+		"address is a page whose address is code.",
+	KeyCheckCSTIFix: "Never compile a value that came from the address. Pass it as data — " +
+		"`ng-bind` or a text binding rather than a template — and keep the framework current, " +
+		"since most of these flaws are fixed in the compiler itself.",
+	KeyCheckPrototypePollutionTitle: "Prototype pollution through a query string",
+	KeyCheckPrototypePollutionDesc: "The page's own code merged the query string into an object " +
+		"without refusing `__proto__`, so a property named in the request was written onto " +
+		"`Object.prototype`. Every object created afterwards — in the page, in every script it " +
+		"loads, in every library it calls — inherits that property. What an attacker gains " +
+		"depends on what reads it: a flag that disables a check, a default that redirects, a " +
+		"gadget that reaches a DOM sink.",
+	KeyCheckPrototypePollutionFix: "Reject `__proto__`, `constructor` and `prototype` as keys at " +
+		"the point the query is parsed, and build objects with `Object.create(null)` or a Map " +
+		"where a lookup table is needed. Freeze `Object.prototype` as a backstop, and keep the " +
+		"parser libraries current — most prototype-pollution bugs are fixed in the library.",
 	KeyCheckDOMXSSTitle: "Cross-site scripting through the page's own script",
 
 	KeyCheckDOMXSSDesc: "The page took a value from the URL and put it into the document as " +
@@ -411,7 +535,9 @@ var english = map[Key]string{
 
 	KeyCheckCMDiTitle: "Command injection",
 	KeyCheckCMDiDesc: "This parameter is passed to a shell without escaping, so an attacker can run " +
-		"arbitrary operating-system commands with the web server's privileges.",
+		"arbitrary operating-system commands with the web server's privileges. The finding is " +
+		"proved one of two ways: the response carries the output of a command that was asked to " +
+		"read a file, or the target called back to an address the scanner controls.",
 	KeyCheckCMDiFix: "Avoid the shell entirely: use an API, or pass arguments as an array to an " +
 		"exec call. If a shell is unavoidable, allowlist the permitted characters and values.",
 
@@ -494,6 +620,7 @@ var english = map[Key]string{
 	KeyMsgScanFinished:        "scan finished: %d finding(s) from %d request(s) in %s",
 	KeyMsgNoFindings:          "no vulnerabilities found",
 	KeyMsgOOBListening:        "out-of-band server listening: http %s, dns %s",
+	KeyMsgOOBInteractsh:       "out-of-band interactions collected at %s",
 	KeyMsgUnknownChecks:       "unknown check or tag: %s",
 	KeyMsgChecksLoaded:        "loaded %d check(s): %d passive, %d active",
 	KeyMsgRequestError:        "request failed: %v",

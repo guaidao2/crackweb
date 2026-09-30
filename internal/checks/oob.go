@@ -30,7 +30,21 @@ const (
 	// callback is not an address to begin with.
 	CallbackHostDecimal = "{callback_host_dec}"
 	CallbackHostHex     = "{callback_host_hex}"
+	// CallbackHostOctal, CallbackHostShort and CallbackHostMapped are the same
+	// authority in the remaining spellings a resolver accepts: per-octet in octal,
+	// with the middle octets left out, and as an IPv6-mapped address. Like the two
+	// above, a payload carrying one is dropped when the callback is reached by
+	// name rather than by address.
+	CallbackHostOctal  = "{callback_host_octal}"
+	CallbackHostShort  = "{callback_host_short}"
+	CallbackHostMapped = "{callback_host_mapped}"
 )
+
+// alternateHostPlaceholders lists the placeholders that describe an address
+// rather than a name.
+var alternateHostPlaceholders = []string{
+	CallbackHostDecimal, CallbackHostHex, CallbackHostOctal, CallbackHostShort, CallbackHostMapped,
+}
 
 // OOBWait is how long an out-of-band check waits for a callback before moving
 // on. The interaction is asynchronous — a blind SSRF fires seconds after the
@@ -172,7 +186,13 @@ func (c *Context) awaitCallbacks(ctx context.Context, pending []pendingAttempt, 
 
 // substituteCallback replaces the callback placeholders in a payload.
 func substituteCallback(value, callbackURL string) string {
-	needsAlternate := strings.Contains(value, CallbackHostDecimal) || strings.Contains(value, CallbackHostHex)
+	needsAlternate := false
+	for _, placeholder := range alternateHostPlaceholders {
+		if strings.Contains(value, placeholder) {
+			needsAlternate = true
+			break
+		}
+	}
 	if !needsAlternate && !strings.Contains(value, CallbackURL) && !strings.Contains(value, CallbackHost) {
 		return value
 	}
@@ -183,27 +203,31 @@ func substituteCallback(value, callbackURL string) string {
 	host = strings.TrimSuffix(host, "/")
 
 	if needsAlternate {
-		decimal, hexadecimal, ok := numericHostForms(host)
-		if !ok {
+		spellings := addressSpellings(host)
+		if spellings == nil {
 			// The callback is reached by name, not by address, and a name has no numeric
 			// spelling. Dropping the payload is the honest answer: sending the placeholder
 			// would test nothing.
 			return ""
 		}
-		value = strings.ReplaceAll(value, CallbackHostDecimal, decimal)
-		value = strings.ReplaceAll(value, CallbackHostHex, hexadecimal)
+		for placeholder, spelling := range spellings {
+			value = strings.ReplaceAll(value, placeholder, spelling)
+		}
 	}
 
 	out := strings.ReplaceAll(value, CallbackURL, callbackURL)
 	return strings.ReplaceAll(out, CallbackHost, host)
 }
 
-// numericHostForms rewrites an address into the spellings a blacklist of dotted quads does
-// not cover: as one decimal number, and as a hexadecimal one. The port, if there is one, is
-// carried through.
-func numericHostForms(host string) (decimal, hexadecimal string, ok bool) {
-	// The authority only: the callback URL carries a path, and a path is not part of the
-	// address. What replaces the placeholder is an authority, so the seed's own path stands.
+// addressSpellings returns the ways one authority can be written that a resolver
+// accepts and a string comparison does not.
+//
+// A filter that blocks a dotted quad — or carries a list of them — has blocked a
+// spelling, not an address. `0x7f000001`, `0177.0.0.1`, `127.1` and
+// `[::ffff:127.0.0.1]` all connect to the same place, and to code that compares
+// text they are four different strings. Nil means the callback is not an address,
+// in which case none of these exist and the payloads that name one are dropped.
+func addressSpellings(host string) map[string]string {
 	authority := host
 	if slash := strings.Index(authority, "/"); slash >= 0 {
 		authority = authority[:slash]
@@ -214,13 +238,26 @@ func numericHostForms(host string) (decimal, hexadecimal string, ok bool) {
 	}
 	parsed := net.ParseIP(address)
 	if parsed == nil {
-		return "", "", false
+		return nil
 	}
-	ip := parsed.To4()
-	if ip == nil {
-		return "", "", false
+	quad := parsed.To4()
+	if quad == nil {
+		return nil
 	}
-	value := uint32(ip[0])<<24 | uint32(ip[1])<<16 | uint32(ip[2])<<8 | uint32(ip[3])
-	return strconv.FormatUint(uint64(value), 10) + port,
-		"0x" + strconv.FormatUint(uint64(value), 16) + port, true
+	number := uint32(quad[0])<<24 | uint32(quad[1])<<16 | uint32(quad[2])<<8 | uint32(quad[3])
+	octet := func(i int) string { return strconv.FormatUint(uint64(quad[i]), 8) }
+	spellings := map[string]string{
+		CallbackHostDecimal: strconv.FormatUint(uint64(number), 10) + port,
+		CallbackHostHex:     "0x" + strconv.FormatUint(uint64(number), 16) + port,
+		CallbackHostOctal:   "0" + octet(0) + ".0" + octet(1) + ".0" + octet(2) + ".0" + octet(3) + port,
+		CallbackHostMapped:  "[::ffff:" + quad.String() + "]" + port,
+	}
+	// The short form leaves out the octets *between* the first and the last, so it
+	// is only the same address when those octets are zero: `127.1` is 127.0.0.1,
+	// while `192.149` is 192.0.0.149 — a different host, and a payload naming it
+	// would be testing the wrong address.
+	if quad[1] == 0 && quad[2] == 0 {
+		spellings[CallbackHostShort] = strconv.Itoa(int(quad[0])) + "." + strconv.Itoa(int(quad[3])) + port
+	}
+	return spellings
 }

@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"net"
 	"net/http"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -106,25 +107,30 @@ func TestTokenExtraction(t *testing.T) {
 	}
 }
 
+// TestTokenFromHTTPRequest: the token is read from where the payload put it — the
+// first path segment, or the sub-domain — and a name that is not one of ours is
+// not mistaken for it.
 func TestTokenFromHTTPRequest(t *testing.T) {
 	server := New(Options{Domain: "oob.example.com"})
 
-	req, _ := http.NewRequest("GET", "http://x/abc123", nil)
+	_, pathToken := server.NewURL("ssrf")
+	req, _ := http.NewRequest("GET", "http://x/"+pathToken, nil)
 	req.Host = "oob.example.com"
-	if got := server.tokenFromHTTP(req); got != "abc123" {
-		t.Errorf("path token = %q, want abc123", got)
+	if got := server.tokenFromHTTP(req); got != pathToken {
+		t.Errorf("path token = %q, want %q", got, pathToken)
 	}
 
+	_, hostToken := server.NewURL("ssrf")
 	req2, _ := http.NewRequest("GET", "http://x/", nil)
-	req2.Host = "def456.oob.example.com"
-	if got := server.tokenFromHTTP(req2); got != "def456" {
-		t.Errorf("subdomain token = %q, want def456", got)
+	req2.Host = hostToken + ".oob.example.com"
+	if got := server.tokenFromHTTP(req2); got != hostToken {
+		t.Errorf("subdomain token = %q, want %q", got, hostToken)
 	}
 
 	req3, _ := http.NewRequest("GET", "http://x/a/b/c", nil)
 	req3.Host = "oob.example.com"
-	if got := server.tokenFromHTTP(req3); got != "a" {
-		t.Errorf("nested path token = %q, want the first segment", got)
+	if got := server.tokenFromHTTP(req3); got != "" {
+		t.Errorf("an unknown path segment was taken for a token: %q", got)
 	}
 }
 
@@ -297,4 +303,36 @@ func TestEventsCarryTheLabel(t *testing.T) {
 	if events[0].RemoteAddr != "10.0.0.9" {
 		t.Errorf("remote = %q", events[0].RemoteAddr)
 	}
+}
+
+// TestCallbackCarriedInAQueryValueIsAttributed: a target that passed our URL along
+// as a parameter of its own sends the callback with the token inside the query
+// rather than in the path. That is what a server-side fetch looks like from here,
+// and the interaction is attributed only if the token is looked for there too.
+func TestCallbackCarriedInAQueryValueIsAttributed(t *testing.T) {
+	server := New(Options{HTTPAddr: "127.0.0.1:0"})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	// Start returns once the listener is up, which is what a scan needs; the
+	// serving happens in the background.
+	if err := server.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer server.Close()
+
+	callbackURL, token := server.NewURL("ssrf")
+	endpoint := "http://" + server.HTTPAddr() + "/fetch?url=" + url.QueryEscape(callbackURL)
+	if _, err := http.Get(endpoint); err != nil {
+		t.Fatalf("callback request failed: %v", err)
+	}
+
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if got := server.Poll(token); len(got) > 0 {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("a callback carrying the token in a query value was not attributed")
 }

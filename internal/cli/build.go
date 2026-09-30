@@ -171,7 +171,7 @@ func (o *requestOptions) normalizer() (*diff.Normalizer, error) {
 // difference engine and the scanner that drives the checks. The HTTP client is
 // passed in so that the reference used to load templates and the one the checks
 // use are the same object, sharing its connection pool and rate limiter.
-func (o *requestOptions) scanContext(ctx context.Context, app *App, client *httpclient.Client, oobServer *oob.Server, selected []checks.Check, passiveOnly bool) (*checks.Context, *scan.Scanner, error) {
+func (o *requestOptions) scanContext(ctx context.Context, app *App, client *httpclient.Client, provider checks.OOBProvider, selected []checks.Check, passiveOnly bool) (*checks.Context, *scan.Scanner, error) {
 	thresholds, err := o.thresholds()
 	if err != nil {
 		return nil, nil, &UsageError{msg: app.T(i18n.KeyErrBadSensitivity)}
@@ -179,11 +179,6 @@ func (o *requestOptions) scanContext(ctx context.Context, app *App, client *http
 	normalizer, err := o.normalizer()
 	if err != nil {
 		return nil, nil, err
-	}
-
-	var provider checks.OOBProvider
-	if oobServer != nil {
-		provider = oobServer
 	}
 
 	engine := diff.NewEngine(thresholds, diff.DefaultKeywords())
@@ -249,7 +244,7 @@ func (o *requestOptions) scanContext(ctx context.Context, app *App, client *http
 func newBrowserProbe(ctx context.Context, app *App, selected []checks.Check) checks.Browser {
 	wanted := false
 	for _, check := range selected {
-		if check.ID() == "dom-xss" {
+		if checks.RequiresBrowser(check) {
 			wanted = true
 			break
 		}
@@ -396,6 +391,46 @@ func loadCA(app *App, dir string) (*ca.CA, error) {
 		app.Note(i18n.KeyMsgCALoaded, dir)
 	}
 	return authority, nil
+}
+
+// buildOOBProvider decides where out-of-band interactions are collected.
+//
+// Three answers, in order of what the operator asked for:
+//
+//   - --oob-interactsh names a deployment that resolves callback names for us —
+//     the only option that works when the target cannot reach this machine.
+//   - --oob-http/--oob-dns start a listener here, which is enough on a lab
+//     network where the target can call back to the tester's host.
+//   - neither leaves out-of-band testing off, and the checks that need it skip
+//     themselves rather than sending payloads whose answers could never arrive.
+//
+// A failure to set either up is reported and then treated as the third case: a
+// scan without out-of-band evidence is worth having, and pretending the channel
+// exists would be worse than not testing it.
+func buildOOBProvider(ctx context.Context, app *App, httpAddr, dnsAddr, domain, interactsh, token string) checks.OOBProvider {
+	if interactsh != "" {
+		server, err := oob.NewInteractsh(interactsh, token, func(format string, args ...any) {
+			if !app.Quiet {
+				app.Printf(format, args...)
+			}
+		})
+		if err != nil {
+			app.Warn(i18n.KeyMsgRequestError, err)
+			return nil
+		}
+		app.Note(i18n.KeyMsgOOBInteractsh, interactsh)
+		return server
+	}
+	if httpAddr == "" && dnsAddr == "" {
+		return nil
+	}
+	server := newOOB(app, oob.Options{HTTPAddr: httpAddr, DNSAddr: dnsAddr, Domain: domain})
+	if err := server.Start(ctx); err != nil {
+		app.Warn(i18n.KeyMsgRequestError, err)
+		return nil
+	}
+	app.Note(i18n.KeyMsgOOBListening, server.HTTPAddr(), server.DNSAddr())
+	return server
 }
 
 // newOOB builds the interaction server. The caller starts it, so that a failure

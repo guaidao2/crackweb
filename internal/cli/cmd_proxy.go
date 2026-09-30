@@ -9,7 +9,6 @@ import (
 	"github.com/guaidao2/crackweb/internal/ca"
 	"github.com/guaidao2/crackweb/internal/httpmsg"
 	"github.com/guaidao2/crackweb/internal/i18n"
-	"github.com/guaidao2/crackweb/internal/oob"
 	"github.com/guaidao2/crackweb/internal/proxy"
 	"github.com/guaidao2/crackweb/internal/sitemap"
 )
@@ -17,17 +16,19 @@ import (
 // proxyOptions is the parsed command line of "crackweb proxy".
 type proxyOptions struct {
 	*requestOptions
-	listen      *string
-	upstream    *string
-	scope       *[]string
-	passiveOnly *bool
-	report      *string
-	checks      *string
-	listChecks  *bool
-	exportCA    *string
-	oobHTTP     *string
-	oobDNS      *string
-	oobDomain   *string
+	listen        *string
+	upstream      *string
+	scope         *[]string
+	passiveOnly   *bool
+	report        *string
+	checks        *string
+	listChecks    *bool
+	exportCA      *string
+	oobHTTP       *string
+	oobDNS        *string
+	oobDomain     *string
+	oobInteractsh *string
+	oobToken      *string
 }
 
 // newProxyCommand builds the intercepting proxy command — the traffic-driven
@@ -48,6 +49,8 @@ func newProxyCommand() *command {
 				oobHTTP:        fs.String("oob-http", "", "", "<addr>", i18n.KeyFlagHTTPAddr),
 				oobDNS:         fs.String("oob-dns", "", "", "<addr>", i18n.KeyFlagDNSAddr),
 				oobDomain:      fs.String("oob-domain", "", "", "<host>", i18n.KeyFlagOOBDomain),
+				oobInteractsh:  fs.String("oob-interactsh", "", "", "<server>", i18n.KeyFlagOOBInteractsh),
+				oobToken:       fs.String("oob-token", "", "", "<token>", i18n.KeyFlagOOBToken),
 			}
 		},
 		runProxy)
@@ -79,20 +82,8 @@ func runProxy(app *App, opts *proxyOptions, _ []string) error {
 
 	// Out-of-band testing is opt-in here: the callback listener has to be
 	// reachable from the target, which is not true of a laptop behind NAT.
-	var oobServer *oob.Server
-	if *opts.oobHTTP != "" || *opts.oobDNS != "" {
-		oobServer = newOOB(app, oob.Options{
-			HTTPAddr: *opts.oobHTTP,
-			DNSAddr:  *opts.oobDNS,
-			Domain:   *opts.oobDomain,
-		})
-		if err := oobServer.Start(ctx); err != nil {
-			app.Warn(i18n.KeyMsgRequestError, err)
-			oobServer = nil
-		} else {
-			app.Note(i18n.KeyMsgOOBListening, oobServer.HTTPAddr(), oobServer.DNSAddr())
-		}
-	}
+	oobProvider := buildOOBProvider(ctx, app, *opts.oobHTTP, *opts.oobDNS,
+		*opts.oobDomain, *opts.oobInteractsh, *opts.oobToken)
 
 	client, err := opts.client()
 	if err != nil {
@@ -103,7 +94,7 @@ func runProxy(app *App, opts *proxyOptions, _ []string) error {
 		return err
 	}
 
-	checkCtx, scanner, err := opts.scanContext(ctx, app, client, oobServer, selected, *opts.passiveOnly)
+	checkCtx, scanner, err := opts.scanContext(ctx, app, client, oobProvider, selected, *opts.passiveOnly)
 	if err != nil {
 		return err
 	}

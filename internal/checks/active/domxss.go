@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"strings"
 
 	"github.com/guaidao2/crackweb/internal/checks"
 	"github.com/guaidao2/crackweb/internal/finding"
@@ -37,6 +38,9 @@ func (domXSS) Passive() bool { return false }
 
 // IsRequestLevel marks this as a check about the page rather than about one parameter.
 func (domXSS) IsRequestLevel() bool { return true }
+
+// NeedsBrowser marks this as a check that a response cannot answer.
+func (domXSS) NeedsBrowser() bool { return true }
 
 // IsUnsafe marks this as more than a request. Loading a page in a real browser runs every
 // script it carries — including the ones that fetch further data and the ones that write
@@ -97,6 +101,23 @@ func (domXSS) Run(ctx context.Context, c *checks.Context, t *checks.Target) []*f
 	return nil
 }
 
+// pathCandidate puts the probe at the end of the address's path, which is where a
+// page that routes on its own path reads it from.
+//
+// The address is assembled by hand rather than through `url.URL`: its String method
+// escapes the path, and an escaped probe is a string no page parses as markup, so
+// the candidate would test nothing.
+func pathCandidate(req *httpmsg.Request, probe string) string {
+	if req == nil || req.URL == nil {
+		return ""
+	}
+	address := req.URL.Scheme + "://" + req.URL.Host + strings.TrimSuffix(req.URL.Path, "/") + "/" + probe
+	if req.URL.RawQuery != "" {
+		address += "?" + req.URL.RawQuery
+	}
+	return address
+}
+
 // domCandidate is one way a value can reach a page's script, and the marker that says
 // whether it arrived.
 type domCandidate struct {
@@ -108,14 +129,28 @@ type domCandidate struct {
 // domCandidates returns the addresses worth loading: the fragment, which the browser keeps
 // to itself, and each query parameter, which a page reads back out of location.search.
 func domCandidates(req *httpmsg.Request, probe func(string) string) []domCandidate {
-	marker := domMarker()
+	fragmentMarker, hashbangMarker, pathMarker := domMarker(), domMarker(), domMarker()
 	out := []domCandidate{{
 		name: "url fragment",
 		// The fragment is appended as it is written. Encoding it would deliver a string
 		// that no longer parses as markup, and the point is to find out whether the page
 		// parses it.
-		url:    req.URLString() + "#" + probe(marker),
-		marker: marker,
+		url:    req.URLString() + "#" + probe(fragmentMarker),
+		marker: fragmentMarker,
+	}, {
+		// `#!` is the fragment an older client-side router reserved for its own
+		// routes, and the value after it is read with `slice(2)` rather than
+		// `slice(1)`. A page that reads the one and not the other is telling.
+		name:   "hashbang fragment",
+		url:    req.URLString() + "#!" + probe(hashbangMarker),
+		marker: hashbangMarker,
+	}, {
+		// The path is a different reader from the fragment, and one the server does
+		// see: a page that filters the query string may still hand its route on to
+		// the document.
+		name:   "url path",
+		url:    pathCandidate(req, probe(pathMarker)),
+		marker: pathMarker,
 	}}
 
 	for _, param := range req.QueryParams() {
