@@ -2,6 +2,7 @@ package crawl
 
 import (
 	"context"
+	"net/url"
 	"strconv"
 	"strings"
 
@@ -24,9 +25,22 @@ func (c *Crawler) replayScriptCall(ctx context.Context, call scriptCall) {
 	if _, ok := c.accept(call.URL, 0); !ok {
 		return
 	}
+	request, ok := scriptCallRequest(call)
+	if !ok {
+		return
+	}
+	c.deliver(ctx, request)
+}
+
+// scriptCallRequest builds the request a script call makes, or reports that it cannot.
+//
+// Split out of the replay so that a one-shot scan can send the same shape without crawling:
+// the body is the whole reason to test an upload endpoint, and a scan that only knew how to
+// send a bare GET would never reach the code behind it.
+func scriptCallRequest(call scriptCall) (*httpmsg.Request, bool) {
 	request, err := httpmsg.NewRequest(call.Method, call.URL)
 	if err != nil {
-		return
+		return nil, false
 	}
 	request.Origin = httpmsg.OriginCrawler
 
@@ -42,7 +56,33 @@ func (c *Crawler) replayScriptCall(ctx context.Context, call scriptCall) {
 	if len(request.Body) > 0 {
 		request.Header.Set("Content-Length", strconv.Itoa(len(request.Body)))
 	}
-	c.deliver(ctx, request)
+	return request, true
+}
+
+// ScriptCall is one request a page's script makes, as the crawler reads it.
+//
+// Exported so that "scan --forms" can send the requests a page's script would send, and not
+// only the ones its HTML forms declare. A modern page often has no form at all: the search
+// box and the upload widget are script calls with a JSON or multipart body, and a scan that
+// ignores them reports nothing about the endpoints they reach.
+type ScriptCall = scriptCall
+
+// ScriptCalls returns the requests a page's script makes, resolved against the page's URL.
+//
+// allowStateChange decides whether calls that only ever run with a writing method are
+// included: they are left out by default, because the request a scan makes is a request the
+// page's own script only makes on purpose.
+func ScriptCalls(body string, base *url.URL, allowStateChange bool) []ScriptCall {
+	return scriptCalls(body, base, allowStateChange)
+}
+
+// ScriptRequests turns a discovered script call into the request it makes.
+func ScriptRequests(call ScriptCall) []*httpmsg.Request {
+	request, ok := scriptCallRequest(call)
+	if !ok {
+		return nil
+	}
+	return []*httpmsg.Request{request}
 }
 
 // encodeScriptMultipart builds the body a FormData produces: one part per field, with a

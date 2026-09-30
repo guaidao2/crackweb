@@ -49,10 +49,12 @@ crackweb scan -u https://example.com/login --forms   # also submit the forms the
 ```
 
 `--forms` covers the case a one-URL scan otherwise misses: a page whose interesting parameters
-are in a form. A form posts to its own address with its own body and encoding, so nothing the
-seed request carries reaches it. With `--forms` crackweb reads the page's forms and submits each
-one, the same way the crawler does — which is what makes a login page, a search box or an upload
-form testable without crawling the whole site.
+are not in the URL. With it crackweb submits what the page declares — its HTML forms, and the
+requests its own scripts make (a JSON body for a search call, a multipart body for an upload) —
+the same way the crawler does. Each of those posts to its own address with its own body and
+encoding, so nothing the seed request carries reaches it; that is what makes a login page, a
+search box or an upload widget testable without crawling the whole site. Calls the page only ever
+makes with PUT, PATCH or DELETE stay out: no form submits with them.
 
 ## Language
 

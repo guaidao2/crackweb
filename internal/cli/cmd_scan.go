@@ -205,18 +205,44 @@ func submitForms(ctx context.Context, checkCtx *checks.Context, scanner *scan.Sc
 	if request.URL == nil || resp == nil || len(resp.Body) == 0 {
 		return
 	}
-	page, err := crawl.Parse(string(resp.Body), request.URL, false)
-	if err != nil || len(page.Forms) == 0 {
-		return
-	}
-	for _, form := range page.Forms {
-		for _, submitted := range crawl.FormRequests(form, request.URL) {
-			formResp, err := checkCtx.Do(ctx, submitted)
-			if err != nil || formResp == nil {
-				continue
-			}
-			store.Add(submitted, formResp)
-			scanner.Submit(submitted, formResp)
+	var submitted []*httpmsg.Request
+
+	if page, err := crawl.Parse(string(resp.Body), request.URL, false); err == nil {
+		for _, form := range page.Forms {
+			submitted = append(submitted, crawl.FormRequests(form, request.URL)...)
 		}
 	}
+	// A modern page often declares no form at all: the search box and the upload widget are
+	// script calls, carrying a JSON or multipart body that no GET reproduces. Those are read
+	// out of the page's own script and sent the way it sends them, so the endpoints behind
+	// them are testable from a single URL too.
+	for _, call := range crawl.ScriptCalls(string(resp.Body), request.URL, true) {
+		// --forms is an explicit request to send what the page sends, so a call the page
+		// makes with POST is included: that is exactly what an HTML form does, and the two
+		// should not differ. PUT, PATCH and DELETE stay out — no form submits with them, and
+		// a scan that sends one is asking a target to change state in the hope of being
+		// allowed to.
+		if !formLikeMethod(call.Method) {
+			continue
+		}
+		submitted = append(submitted, crawl.ScriptRequests(call)...)
+	}
+
+	for _, formReq := range submitted {
+		formResp, err := checkCtx.Do(ctx, formReq)
+		if err != nil || formResp == nil {
+			continue
+		}
+		store.Add(formReq, formResp)
+		scanner.Submit(formReq, formResp)
+	}
+}
+
+// formLikeMethod reports whether a method is one a form can submit with.
+func formLikeMethod(method string) bool {
+	switch strings.ToUpper(method) {
+	case "GET", "HEAD", "POST":
+		return true
+	}
+	return false
 }

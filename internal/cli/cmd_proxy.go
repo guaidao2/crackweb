@@ -105,6 +105,14 @@ func runProxy(app *App, opts *proxyOptions, _ []string) error {
 	// that has gone through already. Without a store they skip themselves.
 	checkCtx.Exchanges = trafficView(store)
 
+	// The proxy forwards a browser's own traffic, so the identity is whatever the browser
+	// sends: its cookies, its Authorization header. --cookie and --header describe a scan
+	// crackweb initiates, and there is nothing here for them to attach to, so say that rather
+	// than accept them and quietly do nothing.
+	if len(*opts.cookies) > 0 || len(*opts.headers) > 0 {
+		app.Warn(i18n.KeyMsgProxyCredentialsIgnored)
+	}
+
 	intercept, err := proxy.New(proxy.Options{
 		Listen:   *opts.listen,
 		Scope:    *opts.scope,

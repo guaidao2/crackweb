@@ -297,13 +297,27 @@ func (c *Client) buildRequest(ctx context.Context, req *httpmsg.Request) (*http.
 		httpReq.Header.Set("Accept", "*/*")
 	}
 
-	c.applyCredentials(httpReq)
+	c.applyCredentials(httpReq, req)
 
 	return httpReq, nil
 }
 
-// applyCredentials adds the configured identity to an outgoing request.
-func (c *Client) applyCredentials(httpReq *http.Request) {
+// applyCredentials adds the configured identity to an outgoing request, and to the message
+// model the checks read.
+//
+// Both have to be written. The wire request is what proves the identity was sent; the message
+// model is what the checks see, and a check that looks at the request it was handed — anything
+// testing a credential, and the passive checks that report on headers — reads that one. Writing
+// only the wire request means every check runs against the anonymous view while the crawl
+// browses as the authenticated user: the scanner believes it is testing what is behind the
+// login, and reports on the login page.
+func (c *Client) applyCredentials(httpReq *http.Request, req *httpmsg.Request) {
+	set := func(name, value string) {
+		httpReq.Header.Set(name, value)
+		if req != nil {
+			req.Header.Set(name, value)
+		}
+	}
 	for _, cred := range c.opts.Credentials {
 		if cred.Name == "" || cred.Value == "" {
 			continue
@@ -314,9 +328,9 @@ func (c *Client) applyCredentials(httpReq *http.Request) {
 			// dropping them would break the very session this exists to
 			// preserve.
 			if existing := httpReq.Header.Get("Cookie"); existing != "" {
-				httpReq.Header.Set("Cookie", existing+"; "+cred.Value)
+				set("Cookie", existing+"; "+cred.Value)
 			} else {
-				httpReq.Header.Set("Cookie", cred.Value)
+				set("Cookie", cred.Value)
 			}
 			continue
 		}
@@ -325,7 +339,7 @@ func (c *Client) applyCredentials(httpReq *http.Request) {
 		// it would be the one thing a scanner must never do to an authenticated
 		// request.
 		if httpReq.Header.Get(cred.Name) == "" {
-			httpReq.Header.Set(cred.Name, cred.Value)
+			set(cred.Name, cred.Value)
 		}
 	}
 }

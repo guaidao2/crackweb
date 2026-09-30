@@ -101,6 +101,11 @@ func (jwt) Run(ctx context.Context, c *checks.Context, t *checks.Target) []*find
 			i18n.KeyCheckJWTTitle, i18n.KeyCheckJWTDesc, i18n.KeyCheckJWTFix)
 		f.Severity = finding.SeverityCritical
 		f.Confidence = finding.ConfidenceCertain
+		// Whether a token's signature is checked is a property of the deployment, not of the
+		// endpoint: a crawl that walks twenty pages reports the same misconfiguration twenty
+		// times and buries everything else. The key is the authority, so two applications on
+		// one host but different ports stay separate findings.
+		f.DedupHostOnly = true
 		f.Method = mutated.Method
 		f.URL = mutated.URLString()
 		f.Payload = forged

@@ -463,3 +463,83 @@ func TestPerRequestTimeoutStillFires(t *testing.T) {
 		t.Error("a request's own deadline was not enforced")
 	}
 }
+
+// TestCredentialsReachTheRequestTheChecksRead pins the half that is easy to lose: the identity
+// has to be visible on the message-model request as well as on the wire.
+//
+// A check is handed the httpmsg.Request, not the wire request, so writing the credential only
+// where net/http can see it leaves every check reading an anonymous request while the crawler
+// browses as the authenticated user. That is the difference between scanning behind a login and
+// scanning the login page and believing it was the other one.
+func TestCredentialsReachTheRequestTheChecksRead(t *testing.T) {
+	var (
+		mu     sync.Mutex
+		auth   string
+		cookie string
+	)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		auth, cookie = r.Header.Get("Authorization"), r.Header.Get("Cookie")
+		mu.Unlock()
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	client, err := New(Options{Credentials: []Credential{
+		{Name: "Authorization", Value: "Bearer crackweb-token"},
+		{Name: "Cookie", Value: "sess=crackweb"},
+	}})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	req, err := httpmsg.NewRequest("GET", server.URL+"/behind-a-login")
+	if err != nil {
+		t.Fatalf("NewRequest: %v", err)
+	}
+	if _, err := client.Do(context.Background(), req); err != nil {
+		t.Fatalf("Do: %v", err)
+	}
+
+	mu.Lock()
+	wireAuth, wireCookie := auth, cookie
+	mu.Unlock()
+
+	if wireAuth != "Bearer crackweb-token" {
+		t.Errorf("the wire request carried %q, want the configured token", wireAuth)
+	}
+	if got := req.Header.Get("Authorization"); got != "Bearer crackweb-token" {
+		t.Errorf("the request the checks read carried %q, want the configured token", got)
+	}
+	if !strings.Contains(wireCookie, "sess=crackweb") {
+		t.Errorf("the wire request carried cookie %q", wireCookie)
+	}
+	if got := req.Header.Get("Cookie"); !strings.Contains(got, "sess=crackweb") {
+		t.Errorf("the request the checks read carried cookie %q", got)
+	}
+}
+
+// TestCredentialsDoNotOverwriteTheRequestsOwnIdentity keeps the rule that made this safe to add:
+// a request that already names an identity is never rewritten.
+func TestCredentialsDoNotOverwriteTheRequestsOwnIdentity(t *testing.T) {
+	client, err := New(Options{Credentials: []Credential{{Name: "Authorization", Value: "Bearer default"}}})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	req, err := httpmsg.NewRequest("GET", "http://example.test/x")
+	if err != nil {
+		t.Fatalf("NewRequest: %v", err)
+	}
+	req.Header.Set("Authorization", "Bearer specific")
+
+	httpReq, err := client.buildRequest(context.Background(), req)
+	if err != nil {
+		t.Fatalf("buildRequest: %v", err)
+	}
+	if got := req.Header.Get("Authorization"); got != "Bearer specific" {
+		t.Errorf("a request's own identity was overwritten with %q", got)
+	}
+	if got := httpReq.Header.Get("Authorization"); got != "Bearer specific" {
+		t.Errorf("the wire request's identity was overwritten with %q", got)
+	}
+}
