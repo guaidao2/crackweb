@@ -97,6 +97,18 @@ func (jwt) Run(ctx context.Context, c *checks.Context, t *checks.Target) []*find
 			continue
 		}
 
+		// Before that conclusion stands, the endpoint has to need a credential at all. An
+		// endpoint that never looks at the header answers 200 to everything, which is exactly
+		// what accepting an unsigned token looks like from the outside — and reporting it
+		// would call every page that ignores Authorization a broken JWT implementation. Ask
+		// once without the credential: if that succeeds too, the token proved nothing.
+		uncredentialed := t.Request.Clone()
+		uncredentialed.Header.Del(field)
+		freeResponse, err := c.Do(ctx, uncredentialed)
+		if err == nil && freeResponse != nil && jwtAccepted(freeResponse) {
+			continue
+		}
+
 		f := checks.NewFinding(jwt{}, t,
 			i18n.KeyCheckJWTTitle, i18n.KeyCheckJWTDesc, i18n.KeyCheckJWTFix)
 		f.Severity = finding.SeverityCritical

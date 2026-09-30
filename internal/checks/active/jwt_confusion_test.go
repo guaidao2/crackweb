@@ -148,3 +148,80 @@ func TestJWTConfusionIsSkippedForSymmetricTokens(t *testing.T) {
 		t.Error("a symmetric token was treated as a candidate for confusion")
 	}
 }
+
+// symmetricTestJWT is an HS256-shaped token. The signature is not checked by the fixtures here:
+// what is under test is whether the endpoint verifies it at all, not whether this one is valid.
+func symmetricTestJWT() string {
+	b64 := base64.RawURLEncoding.EncodeToString
+	return b64([]byte(`{"alg":"HS256","typ":"JWT"}`)) + "." +
+		b64([]byte(`{"sub":"crackweb"}`)) + ".not-a-real-signature"
+}
+
+// TestJWTStaysQuietWhenTheEndpointIgnoresTheHeader is the false positive this check used to
+// report. An endpoint that never reads Authorization answers 200 to a token nobody signed —
+// which is exactly what accepting an unsigned token looks like from the outside. Removing the
+// credential is what separates them: if that succeeds too, the endpoint needs no credential and
+// the forged token proved nothing.
+func TestJWTStaysQuietWhenTheEndpointIgnoresTheHeader(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Never looks at the header.
+		fmt.Fprint(w, "<html><body>welcome, stranger</body></html>")
+	}))
+	defer server.Close()
+
+	request, _ := targetWithHeader(t, server.URL+"/anything")
+	request.Header.Set("Authorization", "Bearer "+symmetricTestJWT())
+
+	h := newHarness(t)
+	baseline, err := h.client.Do(context.Background(), request)
+	if err != nil {
+		t.Fatalf("baseline: %v", err)
+	}
+	if findings := runRequestLevel(t, h, jwt{}, &checks.Target{Request: request, Response: baseline}); len(findings) != 0 {
+		t.Errorf("an endpoint that ignores Authorization was reported: %v", findings[0].Evidence.Matches)
+	}
+}
+
+// TestJWTFiresWhenTheCredentialIsRequiredAndUnsignedIsAccepted is what the check exists for, and
+// it has to survive that control: this endpoint refuses to answer without a credential, and
+// accepts one whose algorithm is "none".
+func TestJWTFiresWhenTheCredentialIsRequiredAndUnsignedIsAccepted(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		auth := r.Header.Get("Authorization")
+		if auth == "" {
+			w.WriteHeader(http.StatusUnauthorized)
+			fmt.Fprint(w, `{"error":"unauthorized"}`)
+			return
+		}
+		parts := strings.Split(strings.TrimPrefix(auth, "Bearer "), ".")
+		header := map[string]any{}
+		if len(parts) > 0 {
+			if decoded, err := base64.RawURLEncoding.DecodeString(parts[0]); err == nil {
+				_ = json.Unmarshal(decoded, &header)
+			}
+		}
+		// Accepts HS256 without checking the signature, and accepts "none" — the misconfiguration
+		// under test. What it does do is refuse to answer without a credential at all.
+		switch alg, _ := header["alg"].(string); {
+		case strings.EqualFold(alg, "none"), alg == "HS256":
+			w.WriteHeader(http.StatusOK)
+			fmt.Fprint(w, `{"user":"crackweb"}`)
+			return
+		}
+		w.WriteHeader(http.StatusUnauthorized)
+		fmt.Fprint(w, `{"error":"unauthorized"}`)
+	}))
+	defer server.Close()
+
+	request, _ := targetWithHeader(t, server.URL+"/api/me")
+	request.Header.Set("Authorization", "Bearer "+symmetricTestJWT())
+
+	h := newHarness(t)
+	baseline, err := h.client.Do(context.Background(), request)
+	if err != nil || baseline.Status != 200 {
+		t.Fatalf("baseline: %v status=%v", err, baseline)
+	}
+	if findings := runRequestLevel(t, h, jwt{}, &checks.Target{Request: request, Response: baseline}); len(findings) == 0 {
+		t.Error("an endpoint that requires a credential accepted an unsigned token, and it was not reported")
+	}
+}
