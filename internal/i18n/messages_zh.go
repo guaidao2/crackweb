@@ -444,7 +444,7 @@ var chinese = map[Key]string{
 	KeyCheckCMDiFix: "尽量避免走 shell：使用 API，或以参数数组的形式调用 exec。" +
 		"若确实无法避免 shell，请对允许的字符与取值做白名单限制。",
 
-	KeyEvidenceBoolean: "真条件与基线一致（%.3f），假条件不一致（%.3f），两个分支之间也有差异（%.3f）",
+	KeyEvidenceBoolean: "真条件与基线一致（%s），假条件不一致（%s），两个分支之间也有差异（%s）",
 	KeyEvidenceTiming:  "响应耗时 %s，基线为 %s",
 	KeyEvidenceReflect: "payload 未经编码地被回显：%s",
 	KeyEvidenceOOB:     "目标回调了 %s（%s，来自 %s）",

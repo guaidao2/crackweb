@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -611,5 +612,85 @@ func TestPercentDecodedHandlesBytesThatAreNotUTF8(t *testing.T) {
 	}
 	if percentDecoded("no escapes") != "no escapes" {
 		t.Errorf("a plain value was changed: %q", percentDecoded("no escapes"))
+	}
+}
+
+// TestSQLiUnionFindsAResultWiderThanTheSeedsWalk covers the count no fixed bound reaches.
+//
+// A thirteen-column result set is ordinary, and the seeds stop at maxUnionColumns. The width is
+// discoverable instead: `ORDER BY n` is accepted up to the width and refused past it, so the
+// check asks rather than guessing upward.
+func TestSQLiUnionFindsAResultWiderThanTheSeedsWalk(t *testing.T) {
+	const width = 13
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		q := r.URL.Query().Get("q")
+		// ORDER BY n: accepted to the width, a 500 past it.
+		if idx := strings.Index(strings.ToUpper(q), "ORDER BY "); idx >= 0 {
+			// The value runs to the first non-digit: the payload writes `ORDER BY 13-- -`.
+			rest := q[idx+len("ORDER BY "):]
+			digits := rest[:len(rest)-len(strings.TrimLeft(rest, "0123456789"))]
+			n, err := strconv.Atoi(digits)
+			if err == nil && n > width {
+				w.WriteHeader(http.StatusInternalServerError)
+				fmt.Fprint(w, "search failed")
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprintf(w, `{"rows":null,"keyword":%q}`, q)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		if idx := strings.Index(strings.ToUpper(q), "UNION SELECT"); idx >= 0 {
+			values := unionNumberRe.FindAllString(q[idx:], -1)
+			if len(values) == width {
+				// The rows come back as data, and the keyword field echoes the input too.
+				fmt.Fprintf(w, `{"rows":[{"a":"%s"}],"keyword":%q}`, strings.Join(values, ","), q)
+				return
+			}
+			w.WriteHeader(http.StatusInternalServerError)
+			fmt.Fprint(w, "search failed")
+			return
+		}
+		fmt.Fprintf(w, `{"rows":null,"keyword":%q}`, q)
+	}))
+	t.Cleanup(server.Close)
+
+	h := newHarness(t)
+	request, _ := httpmsg.NewRequest("GET", server.URL+"/search?q=a")
+	baseline, err := h.client.Do(context.Background(), request)
+	if err != nil {
+		t.Fatalf("baseline: %v", err)
+	}
+	params := request.Params()
+	findings := runRequestLevel(t, h, sqliUnion{}, &checks.Target{Request: request, Response: baseline, Param: &params[0]})
+	if len(findings) == 0 {
+		t.Fatalf("a %d-column result set was not found", width)
+	}
+	if !strings.Contains(findings[0].Payload, "UNION SELECT") {
+		t.Errorf("payload = %q", findings[0].Payload)
+	}
+}
+
+// TestSQLiUnionStaysQuietWhenTheOnlyMarkersAreTheEcho is the false positive the per-marker count
+// exists for: the page prints the term it was given, in a field beside a null result set, so the
+// markers are there whether or not a statement ran.
+func TestSQLiUnionStaysQuietWhenTheOnlyMarkersAreTheEcho(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		q := r.URL.Query().Get("q")
+		w.Header().Set("Content-Type", "application/json")
+		// A struct scan that drops every row the UNION produced: rows stay null.
+		fmt.Fprintf(w, `{"rows":null,"keyword":%q}`, q)
+	}))
+	t.Cleanup(server.Close)
+
+	h := newHarness(t)
+	request, _ := httpmsg.NewRequest("GET", server.URL+"/search?q=a")
+	baseline, err := h.client.Do(context.Background(), request)
+	if err != nil {
+		t.Fatalf("baseline: %v", err)
+	}
+	params := request.Params()
+	if findings := runRequestLevel(t, h, sqliUnion{}, &checks.Target{Request: request, Response: baseline, Param: &params[0]}); len(findings) != 0 {
+		t.Errorf("a page that only echoed its input was reported: %v", findings[0].Evidence.Matches)
 	}
 }

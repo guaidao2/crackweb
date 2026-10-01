@@ -541,8 +541,8 @@ var english = map[Key]string{
 	KeyCheckCMDiFix: "Avoid the shell entirely: use an API, or pass arguments as an array to an " +
 		"exec call. If a shell is unavoidable, allowlist the permitted characters and values.",
 
-	KeyEvidenceBoolean: "true branch matched the baseline (%.3f), false branch did not (%.3f); " +
-		"the two branches differ (%.3f)",
+	KeyEvidenceBoolean: "true branch matched the baseline (%s), false branch did not (%s); " +
+		"the two branches differ (%s)",
 	KeyEvidenceTiming:  "the response took %s against a baseline of %s",
 	KeyEvidenceReflect: "the payload came back unencoded: %s",
 	KeyEvidenceOOB:     "the target called back to %s (%s from %s)",

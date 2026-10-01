@@ -358,12 +358,12 @@ crackweb crawl -u https://staging.example.com --basic-auth alice:s3cret
 - `--basic-auth` takes `user:password`; only the first colon separates them, since
   passwords contain colons.
 
-`--sessions` is a different thing. It takes two or more identities and is used by
+`--session` is a different thing. Repeated, it takes two or more identities and is used by
 the access-control check to compare what each of them can reach:
 
 ```sh
 crackweb scan -u https://app.example.com/orders/1001 \
-  --sessions "Cookie: session=alice" --sessions "Cookie: session=bob"
+  --session "Cookie: session=alice" --session "Cookie: session=bob"
 ```
 
 ## User-Agent

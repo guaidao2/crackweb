@@ -321,11 +321,11 @@ crackweb crawl -u https://staging.example.com --basic-auth alice:s3cret
   请求自己声明的身份比命令行默认值更具体，绝不被覆盖。
 - `--basic-auth` 接受 `user:password`；只有第一个冒号是分隔符，因为密码里本来就可能含冒号。
 
-`--sessions` 是另一回事。它接受两个或更多身份，供越权检测比较各自能访问到什么：
+`--session` 是另一回事。重复给两次就是两个或更多身份，供越权检测比较各自能访问到什么：
 
 ```sh
 crackweb scan -u https://app.example.com/orders/1001 \
-  --sessions "Cookie: session=alice" --sessions "Cookie: session=bob"
+  --session "Cookie: session=alice" --session "Cookie: session=bob"
 ```
 
 ## User-Agent

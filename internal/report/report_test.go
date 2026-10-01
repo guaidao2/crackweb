@@ -364,3 +364,48 @@ func TestRenderProducesValidUTF8(t *testing.T) {
 		}
 	}
 }
+
+// TestReportPutsTheBoundaryBeforeTheNumbers pins where the coverage boundary belongs.
+//
+// A scan that was cut short — requests never answered, something answering in the application's
+// place — says how much the counts below it can be trusted, so it has to be read first. It used
+// to sit among the metadata (start time, duration, request count) in the HTML report, which is
+// where a reader looks last.
+func TestReportPutsTheBoundaryBeforeTheNumbers(t *testing.T) {
+	data := sampleData(t, i18n.EN)
+	data.Boundary = Boundary{Unanswered: 7}
+
+	var buf bytes.Buffer
+	if err := HTML(&buf, data); err != nil {
+		t.Fatalf("HTML: %v", err)
+	}
+	html := buf.String()
+
+	alert := strings.Index(html, "boundary-alert")
+	cards := strings.Index(html, `class="cards"`)
+	if alert < 0 {
+		t.Fatal("the boundary was not rendered at all")
+	}
+	if cards < 0 || alert > cards {
+		t.Errorf("the boundary is not ahead of the summary numbers (boundary@%d cards@%d)", alert, cards)
+	}
+	if !strings.Contains(html, "7") {
+		t.Error("the boundary lost the count it was given")
+	}
+
+	// The text report puts it before the findings, and before the "nothing found" line, for the
+	// same reason.
+	var mdBuf bytes.Buffer
+	if err := Markdown(&mdBuf, data); err != nil {
+		t.Fatalf("Markdown: %v", err)
+	}
+	text := mdBuf.String()
+	boundaryAt := strings.Index(text, "Coverage boundary")
+	firstFinding := strings.Index(text, "## 1.")
+	if boundaryAt < 0 {
+		t.Fatal("the markdown report dropped the boundary")
+	}
+	if firstFinding >= 0 && boundaryAt > firstFinding {
+		t.Errorf("the markdown boundary is after the findings (boundary@%d findings@%d)", boundaryAt, firstFinding)
+	}
+}

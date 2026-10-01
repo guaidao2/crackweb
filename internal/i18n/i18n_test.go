@@ -269,3 +269,29 @@ func TestMain(m *testing.M) {
 	}
 	os.Exit(m.Run())
 }
+
+// TestFormattedTemplatesMatchWhatTheCallersPass catches the class of defect a reader sees as a
+// raw format verb in the report: a template written `%.3f` while the caller passes a string that
+// was already formatted, which renders as `%!f(string=0.9)`.
+//
+// The checks format similarities with strconv before handing them to the bundle, so any template
+// that expects a float and receives that string is a bug in one of the two. This renders each
+// template that names a float verb with the value a caller actually passes.
+func TestFormattedTemplatesMatchWhatTheCallersPass(t *testing.T) {
+	// What the callers pass for a similarity: strconv.FormatFloat(v, 'f', 3, 64).
+	formatted := strconv.FormatFloat(0.9, 'f', 3, 64)
+
+	for _, b := range []*Bundle{New(EN), New(ZH)} {
+		got := b.T(KeyEvidenceBoolean, formatted, formatted, formatted)
+		if strings.Contains(got, "%!") {
+			t.Errorf("KeyEvidenceBoolean renders a format mismatch: %s", got)
+		}
+		if !strings.Contains(got, "0.900") {
+			t.Errorf("KeyEvidenceBoolean lost the value it was given: %s", got)
+		}
+		// The CSRF evidence takes a percentage as a float, so it keeps its float verb.
+		if cs := b.T(KeyEvidenceCSRF, "csrf", "x", 88.0); strings.Contains(cs, "%!") {
+			t.Errorf("KeyEvidenceCSRF renders a format mismatch: %s", cs)
+		}
+	}
+}

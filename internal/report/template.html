@@ -340,6 +340,23 @@
     .finding { break-inside: avoid; page-break-inside: avoid; }
     pre { background: #f4f4f4; color: #111; border: 1px solid #ddd; }
   }
+  .boundary-alert {
+    border: 1px solid #c9a227;
+    border-left: 4px solid #c9a227;
+    background: #fffdf3;
+    border-radius: 6px;
+    padding: 12px 16px;
+    margin: 0 0 18px;
+  }
+  .boundary-alert h3 {
+    margin: 0 0 6px;
+    font-size: 0.95rem;
+    color: #8a6d1a;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+  }
+  .boundary-alert .boundary { margin: 0; padding-left: 18px; }
+
 </style>
 </head>
 <body>
@@ -358,6 +375,13 @@
   <section class="summary">
     <h2>{{.Labels.Summary}}</h2>
 
+    {{if .Boundary}}
+    <div class="boundary-alert">
+      <h3>{{.Labels.Boundary}}</h3>
+      <ul class="boundary">{{range .Boundary}}<li>{{.}}</li>{{end}}</ul>
+    </div>
+    {{end}}
+
     <div class="cards">
       {{range .Cards}}
       <div class="card {{.Class}}">
@@ -375,12 +399,6 @@
       <div><dt>{{.Labels.Endpoints}}</dt><dd>{{.Endpoints}}</dd></div>
       <div><dt>{{.Labels.Requests}}</dt><dd>{{.Requests}}</dd></div>
       {{if .Hosts}}<div><dt>{{.Labels.Hosts}}</dt><dd>{{.Hosts}}</dd></div>{{end}}
-      {{if .Boundary}}
-      <div>
-        <dt>{{.Labels.Boundary}}</dt>
-        <dd><ul class="boundary">{{range .Boundary}}<li>{{.}}</li>{{end}}</ul></dd>
-      </div>
-      {{end}}
     </dl>
   </section>
 
