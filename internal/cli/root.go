@@ -186,6 +186,7 @@ func (a *App) commands() []*command {
 		newScanCommand(),
 		newOobCommand(),
 		newCaCommand(),
+		newLocalCommand(),
 	}
 }
 

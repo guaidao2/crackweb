@@ -66,6 +66,12 @@ type Context struct {
 	// to compare what two users can see. Fewer than two means those checks
 	// cannot run, which is a supported configuration.
 	Sessions []Session
+	// JWTSecrets are signing keys the operator already knows: found in a config file, in a
+	// bundle, in a repository. Each is tried as the key behind the tokens the target issues —
+	// re-signing the token it accepted and asking whether that one is accepted too. It is an
+	// online test of an offline discovery: a secret that produces a token the service takes
+	// proves the identity is forgeable, which scouting a signature in a lab does not.
+	JWTSecrets []string
 	// WAF remembers what each target's firewall does and which payload
 	// generation gets through it. A nil state means the scanner behaves as if
 	// no target is protected, which is what a user gets with WAF handling

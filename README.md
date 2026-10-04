@@ -78,6 +78,20 @@ The same applies to reports: a scan run with `--lang zh` produces a Chinese repo
 | `scan` | Scan a single target, or a raw HTTP request saved from another tool |
 | `oob` | Run the out-of-band interaction server (DNS and HTTP callbacks) |
 | `ca` | Create, inspect and export the CA certificate used for HTTPS interception |
+| `local` | Run an offline analysis on something you already have — nothing is sent |
+
+Offline analyses take an artifact rather than a target. The first is a JSON Web Token:
+
+```sh
+crackweb local jwt "<token>"                 # decode it, and try the built-in secret list
+crackweb local jwt "<token>" -w words.txt    # ...alongside your own wordlist
+```
+
+Every guess is arithmetic on a token you already hold: no request is made, so there is no
+target to lock out and no log to fill. Candidates come from the built-in list, from your
+wordlist, and from the token's own claims — `iss: "NeuraTech-OA"` suggests `NeuraTech2024`,
+which no general wordlist carries. A secret that reproduces the signature is reported, with
+the finding that anyone holding it can mint a token for any identity.
 
 `crackweb <command> --help` documents every option; `crackweb scan --list-checks` lists
 the available checks.
@@ -272,6 +286,25 @@ loads the page and asks its runtime whether a property named in the query string
 ```sh
 crackweb scan -u https://app.example.com/page --checks dom-xss
 ```
+
+### When you already have the signing key
+
+A JWT secret turns up in a config file, a bundle, a repository, a screenshot — and a secret in
+hand is one request away from proof. `--jwt-secret` takes a key and, for every token the target
+issues, re-signs it and offers it back:
+
+```sh
+crackweb scan -u https://app.example.com/api/me -H "Authorization: Bearer $TOKEN" \
+  --jwt-secret "the-key-from-the-config"
+```
+
+The finding is the acceptance, not the key: a service that takes a token this key signed is
+issuing identities to anyone who has it, whatever the token originally said. No key supplied
+means the check behaves exactly as it did before. If the target is not signing with a
+keyed-hash algorithm there is nothing to reproduce and the key is not tried.
+
+Recovering the key itself is offline work — `crackweb local jwt` — and the two are meant to be
+used together: recover it locally, then prove it here.
 
 ## WAF evasion
 

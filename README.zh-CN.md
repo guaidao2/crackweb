@@ -70,6 +70,19 @@ CRACKWEB_LANG=zh crackweb --help  # 通过环境变量达到同样效果
 | `scan` | 扫描单个目标，或一份其它工具保存下来的原始 HTTP 请求 |
 | `oob` | 启动带外交互服务器（DNS 与 HTTP 回调） |
 | `ca` | 创建、查看并导出用于 HTTPS 拦截的 CA 证书 |
+| `local` | 对已有的物件做离线分析——不发送任何流量 |
+
+离线分析接收的是物件本身，而不是目标。第一个是 JSON Web Token：
+
+```sh
+crackweb local jwt "<token>"                 # 解码，并用内置密钥列表尝试
+crackweb local jwt "<token>" -w words.txt    # 同时试你自己的字典
+```
+
+每一次猜测都是对你手上这个 token 做运算：不发请求，因此不存在锁账号或污染日志的问题。
+候选来自内置列表、你的字典，以及 token 自身的声明——`iss: "NeuraTech-OA"` 能推出
+`NeuraTech2024`，而任何通用字典都不会收录它。能还原签名的密钥会被报出，并说明持有它
+的人可以为任意身份伪造 token。
 
 `crackweb <子命令> --help` 里有每个选项的说明；`crackweb scan --list-checks` 列出全部检测项。
 
@@ -327,6 +340,23 @@ crackweb crawl -u https://staging.example.com --basic-auth alice:s3cret
 crackweb scan -u https://app.example.com/orders/1001 \
   --session "Cookie: session=alice" --session "Cookie: session=bob"
 ```
+
+### 已经知道签名密钥时
+
+JWT 的密钥往往来自配置文件、打包产物、代码仓库或一张截图 —— 而密钥在手，距离证据只差一个
+请求。`--jwt-secret` 接收一个密钥，对目标签发的每个 token 重新签名并回送：
+
+```sh
+crackweb scan -u https://app.example.com/api/me -H "Authorization: Bearer $TOKEN" \
+  --jwt-secret "配置文件里的那串密钥"
+```
+
+结论来自"服务端接受了"，而不是"拿到了密钥"：接受这个密钥签名的 token，意味着持有它的人
+可以为任意身份签发。不给 `--jwt-secret` 时行为与之前完全一致。若目标用的是非对称算法，
+不存在"可复现的密钥"，也就不会尝试。
+
+密钥本身怎么拿到是离线的事 —— `crackweb local jwt` —— 两者是配套的：本地还原，再在这里
+证明。
 
 ## User-Agent
 

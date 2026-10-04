@@ -9,6 +9,7 @@ import (
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"math/big"
 	"strings"
 	"time"
@@ -17,6 +18,7 @@ import (
 	"github.com/guaidao2/crackweb/internal/finding"
 	"github.com/guaidao2/crackweb/internal/httpmsg"
 	"github.com/guaidao2/crackweb/internal/i18n"
+	"github.com/guaidao2/crackweb/internal/local"
 )
 
 // jwtLocations are the request fields a token is carried in.
@@ -145,12 +147,107 @@ func (jwt) Run(ctx context.Context, c *checks.Context, t *checks.Target) []*find
 	if f := jwtAlgorithmConfusion(ctx, c, t, field, original, parts, header); f != nil {
 		return []*finding.Finding{f}
 	}
+	// A key the operator already holds, which is the offline discovery cashed in: a secret
+	// that signs a token the service accepts makes every identity forgeable, and that is a
+	// conclusion about the service rather than about arithmetic.
+	if f := jwtKnownSecret(ctx, c, t, field, original, parts, header); f != nil {
+		return []*finding.Finding{f}
+	}
 	// Last, because it needs an interaction server and proves a different thing: the
 	// verifier follows an address the token supplies.
 	if f := jwtKeyURL(ctx, c, t, field, original, parts, header); f != nil {
 		return []*finding.Finding{f}
 	}
 	return nil
+}
+
+// jwtKnownSecret tries keys the operator supplied as the secret behind the token in hand.
+//
+// This is where an offline finding becomes an online one. Recovering a secret from a token
+// proves the token was signed with it; it does not prove the service still uses it, and a
+// rotated or leaked-but-abandoned key is not a vulnerability. Signing the very token the
+// service accepted and offering it back settles that — nothing about the request changes
+// except the signature, so a service that takes it has just been told an identity it may not
+// have meant to issue.
+func jwtKnownSecret(ctx context.Context, c *checks.Context, t *checks.Target, field, original string, parts []string, header map[string]any) *finding.Finding {
+	if len(c.JWTSecrets) == 0 {
+		return nil
+	}
+	// Only a keyed-hash signature can be reproduced from a secret; an asymmetric one cannot.
+	if !local.SymmetricAlgorithm(headerAlgorithm(header)) {
+		return nil
+	}
+
+	claims, err := decodeJWTPart(parts[1])
+	if err != nil {
+		return nil
+	}
+
+	for _, secret := range c.JWTSecrets {
+		forged := local.SignWith(headerAlgorithm(header), parts[0]+"."+parts[1], []byte(secret))
+		if forged == original {
+			// The key supplied is the one already behind this token, and the service just
+			// accepted a token it signed. That is the strongest form of the finding rather
+			// than a reason to skip it: the exchange is proof, and a second request cannot
+			// add anything to it.
+			f := checks.NewFinding(jwt{}, t, i18n.KeyCheckJWTTitle, i18n.KeyCheckJWTDesc, i18n.KeyCheckJWTFix)
+			f.Param = field
+			f.Payload = secret
+			f.Severity = finding.SeverityCritical
+			f.Confidence = finding.ConfidenceCertain
+			f.DedupHostOnly = true
+			f.Evidence.Matches = []string{original}
+			f.Evidence.Diff = fmt.Sprintf("the token was signed with the supplied key %q, and the service accepted it", secret)
+			return f
+		}
+
+		// Ask with the token signed under the known key. Nothing else about the request
+		// changes, so an acceptance is about the signature.
+		mutated := t.Request.Clone()
+		mutated.Header.Set(field, replaceToken(t.Request.Header.Get(field), original, forged))
+		response, err := c.Do(ctx, mutated)
+		if err != nil || response == nil || !jwtAccepted(response) {
+			continue
+		}
+
+		// The control this check uses everywhere: an endpoint that never looks at the
+		// credential answers to anything, and that weakness — if it is one — is what the
+		// alg=none attempts above report.
+		control := t.Request.Clone()
+		control.Header.Del(field)
+		if unauthenticated, err := c.Do(ctx, control); err == nil && unauthenticated != nil && jwtAccepted(unauthenticated) {
+			continue
+		}
+
+		// A signature that is simply wrong must be refused, or the acceptance was about
+		// something other than the key.
+		wrong := local.SignWith(headerAlgorithm(header), parts[0]+"."+parts[1], []byte(secret+"x"))
+		sanity := t.Request.Clone()
+		sanity.Header.Set(field, replaceToken(t.Request.Header.Get(field), original, wrong))
+		if mistaken, err := c.Do(ctx, sanity); err == nil && mistaken != nil && jwtAccepted(mistaken) {
+			continue
+		}
+
+		f := checks.NewFinding(jwt{}, t, i18n.KeyCheckJWTTitle, i18n.KeyCheckJWTDesc, i18n.KeyCheckJWTFix)
+		f.Param = field
+		f.Payload = secret
+		f.Severity = finding.SeverityCritical
+		f.Confidence = finding.ConfidenceCertain
+		f.DedupHostOnly = true
+		f.Evidence.Matches = []string{original, forged}
+		f.Evidence.Diff = fmt.Sprintf("re-signed with the key %q; the service accepted it", secret)
+		_ = claims
+		return f
+	}
+	return nil
+}
+
+// headerAlgorithm reads the "alg" a header declares.
+func headerAlgorithm(header map[string]any) string {
+	if value, ok := header["alg"].(string); ok {
+		return value
+	}
+	return ""
 }
 
 // kidForgerySpellings are key identifiers that make a verifier read a key the

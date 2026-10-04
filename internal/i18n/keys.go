@@ -78,6 +78,35 @@ const (
 	// KeyFlagOOBInteractsh names a deployment that collects interactions elsewhere.
 	KeyFlagOOBInteractsh Key = "oob.flag.interactsh"
 
+	KeyFlagJWTSecret Key = "flag.jwt-secret"
+	KeyMsgJWTSecrets Key = "msg.jwt-secrets"
+
+	// local (offline) options.
+	KeyCmdLocalSummary            Key = "cmd.local.summary"
+	KeyUsageLocal                 Key = "usage.local"
+	KeyFlagLocalWordlist          Key = "local.flag.wordlist"
+	KeyErrLocalNoSubject          Key = "local.err.no-subject"
+	KeyErrLocalUnknownSubject     Key = "local.err.unknown-subject"
+	KeyErrLocalNoToken            Key = "local.err.no-token"
+	KeyErrLocalBadToken           Key = "local.err.bad-token"
+	KeyErrLocalWordlist           Key = "local.err.wordlist"
+	KeyMsgLocalHeader             Key = "local.msg.header"
+	KeyMsgLocalClaims             Key = "local.msg.claims"
+	KeyMsgLocalField              Key = "local.msg.field"
+	KeyMsgLocalNoAlgorithm        Key = "local.msg.no-algorithm"
+	KeyMsgLocalAlgorithm          Key = "local.msg.algorithm"
+	KeyMsgLocalUnsigned           Key = "local.msg.unsigned"
+	KeyMsgLocalExpired            Key = "local.msg.expired"
+	KeyMsgLocalValidUntil         Key = "local.msg.valid-until"
+	KeyMsgLocalNotSymmetric       Key = "local.msg.not-symmetric"
+	KeyMsgLocalTrying             Key = "local.msg.trying"
+	KeyMsgLocalNoSecret           Key = "local.msg.no-secret"
+	KeyMsgLocalSecretFound        Key = "local.msg.secret-found"
+	KeyMsgLocalSecretFromFile     Key = "local.msg.secret-from-file"
+	KeyMsgLocalSecretFromDefaults Key = "local.msg.secret-from-defaults"
+	KeyMsgLocalSecretDerived      Key = "local.msg.secret-derived"
+	KeyMsgLocalSigned             Key = "local.msg.signed"
+
 	// ca options.
 	KeyFlagOutDir Key = "ca.flag.out"
 	KeyFlagForce  Key = "ca.flag.force"

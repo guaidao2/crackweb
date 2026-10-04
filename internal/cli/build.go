@@ -52,6 +52,7 @@ type requestOptions struct {
 	cookies      *[]string
 	headers      *[]string
 	basicAuth    *string
+	jwtSecrets   *[]string
 	randomUA     *bool
 }
 
@@ -75,6 +76,7 @@ func addRequestFlags(fs *FlagSet) *requestOptions {
 		cookies:      fs.StringSlice("cookie", "C", "<k=v; k2=v2>", i18n.KeyFlagCookie),
 		headers:      fs.StringSlice("header", "H", "<name: value>", i18n.KeyFlagHeader),
 		basicAuth:    fs.String("basic-auth", "", "", "<user:pass>", i18n.KeyFlagBasicAuth),
+		jwtSecrets:   fs.StringSlice("jwt-secret", "", "<value>", i18n.KeyFlagJWTSecret),
 		randomUA:     fs.Bool("random-ua", "", i18n.KeyFlagRandomUA),
 		unsafeChecks: fs.Bool("enable-unsafe-checks", "", i18n.KeyFlagUnsafeChecks),
 	}
@@ -209,6 +211,14 @@ func (o *requestOptions) scanContext(ctx context.Context, app *App, client *http
 	// --no-assume-waf keeps the detection but drops the assumption.
 	checkCtx.AssumeWAF = !*o.noAssumeWAF && !*o.noWAF
 	checkCtx.Sessions = parseSessions(*o.sessions)
+
+	// Keys the operator already knows. Tried against whatever tokens the target issues, which
+	// turns "I found this secret in a config file" into "this secret mints identities the
+	// service accepts".
+	if secrets := nonEmpty(*o.jwtSecrets); len(secrets) > 0 {
+		checkCtx.JWTSecrets = secrets
+		app.Note(i18n.KeyMsgJWTSecrets, len(secrets))
+	}
 
 	// The access-control check is meaningless with fewer than two identities;
 	// say so before the scan rather than letting it silently do nothing.
@@ -594,4 +604,15 @@ func (a *App) printChecks() {
 		a.Printf("  %-28s %-8s %-9s %-16s %s", check.ID(), kind, check.Severity(), optIn,
 			strings.Join(check.Tags(), ","))
 	}
+}
+
+// nonEmpty trims and drops the entries a repeated flag leaves behind.
+func nonEmpty(values []string) []string {
+	var out []string
+	for _, value := range values {
+		if trimmed := strings.TrimSpace(value); trimmed != "" {
+			out = append(out, trimmed)
+		}
+	}
+	return out
 }
