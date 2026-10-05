@@ -399,9 +399,22 @@ const (
 	KeyCheckXXEFix   Key = "check.xxe.remediation"
 
 	// Active check: JSON Web Token weaknesses.
-	KeyCheckJWTTitle Key = "check.jwt.title"
-	KeyCheckJWTDesc  Key = "check.jwt.description"
-	KeyCheckJWTFix   Key = "check.jwt.remediation"
+	KeyEvidenceJWTWeakSecretSameKey  Key = "evidence.jwt.weak-secret.same-key"
+	KeyEvidenceJWTWeakSecretReSigned Key = "evidence.jwt.weak-secret.re-signed"
+	KeyCheckJWTKidTitle              Key = "check.jwt.kid.title"
+	KeyCheckJWTKidDesc               Key = "check.jwt.kid.desc"
+	KeyCheckJWTConfusionTitle        Key = "check.jwt.confusion.title"
+	KeyCheckJWTConfusionDesc         Key = "check.jwt.confusion.desc"
+	KeyCheckJWTKeyURLTitle           Key = "check.jwt.keyurl.title"
+	KeyCheckJWTKeyURLDesc            Key = "check.jwt.keyurl.desc"
+	KeyEvidencePoisonedURL           Key = "evidence.poisoned-url"
+	KeyEvidenceRenderedText          Key = "evidence.rendered-text"
+	KeyEvidencePrototypePollution    Key = "evidence.prototype-pollution"
+	KeyCheckJWTWeakSecretTitle       Key = "check.jwt.weak-secret.title"
+	KeyCheckJWTWeakSecretDesc        Key = "check.jwt.weak-secret.desc"
+	KeyCheckJWTTitle                 Key = "check.jwt.title"
+	KeyCheckJWTDesc                  Key = "check.jwt.description"
+	KeyCheckJWTFix                   Key = "check.jwt.remediation"
 
 	// Active check: missing CSRF protection.
 	KeyCheckCSRFTitle Key = "check.csrf.title"

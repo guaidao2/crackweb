@@ -133,7 +133,7 @@ func (prototypePollution) Run(ctx context.Context, c *checks.Context, t *checks.
 			"a brand-new object carries the property, so it is on Object.prototype and every " +
 				"later piece of code inherits it",
 		}
-		f.Evidence.Diff = "new {}[" + marker + "] === " + pollutionValue
+		f.Evidence.Diff = c.Bundle.T(i18n.KeyEvidencePrototypePollution, marker, pollutionValue)
 		return []*finding.Finding{f}
 	}
 	return nil

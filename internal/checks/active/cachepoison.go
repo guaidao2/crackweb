@@ -123,7 +123,7 @@ func (cachePoisoning) Run(ctx context.Context, c *checks.Context, t *checks.Targ
 		f.Evidence.Response = truncate(stored.Raw(), 8192)
 		f.Evidence.Baseline = truncate(t.Response.Raw(), 4096)
 		f.Evidence.Matches = []string{c.Bundle.T(i18n.KeyEvidenceCache, header)}
-		f.Evidence.Diff = "the poisoned URL is " + clean
+		f.Evidence.Diff = c.Bundle.T(i18n.KeyEvidencePoisonedURL, clean)
 		return []*finding.Finding{f}
 	}
 	return nil

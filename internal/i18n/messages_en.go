@@ -725,7 +725,20 @@ var english = map[Key]string{
 	KeyCheckXXEFix: "Disable external entity and DTD processing on every XML parser " +
 		"(LIBXML_NOENT and friends), and prefer a format that does not carry a schema.",
 
-	KeyCheckJWTTitle: "JSON Web Token accepted without a valid signature",
+	KeyEvidenceJWTWeakSecretSameKey:  "the token was signed with the key %q, and the service accepted it",
+	KeyEvidenceJWTWeakSecretReSigned: "re-signed the token with the key %q; the service accepted the result",
+	KeyCheckJWTKidTitle:              "JSON Web Token verified with a key identifier the caller chooses",
+	KeyCheckJWTKidDesc:               "The token's kid header is used to look up a verification key before it is authenticated, so a token naming a key of the caller's choosing — an empty file, or a value read out of a query — is signed with that key and accepted. The signature proves nothing, because the caller picked both the message and the key.",
+	KeyCheckJWTConfusionTitle:        "JSON Web Token verified with a public key used as the HMAC secret",
+	KeyCheckJWTConfusionDesc:         "The service signs asymmetrically but accepts a token whose header asks for a keyed-hash algorithm. The secret it verifies against is the public key, which is public by design — so anyone can sign a token the service accepts. It is the algorithm in the header that decides, and that field is attacker-controlled.",
+	KeyCheckJWTKeyURLTitle:           "JSON Web Token accepted with a key fetched from an address the token supplies",
+	KeyCheckJWTKeyURLDesc:            "The verifier fetched the token's verification key from a URL named in the token itself (jku, jwk or x5u) and accepted the result. Whoever can reach the verification step can point it at a key document of their own, sign a token with the matching private key, and be believed.",
+	KeyEvidencePoisonedURL:           "the poisoned URL is %s",
+	KeyEvidenceRenderedText:          "the rendered page contains %s",
+	KeyEvidencePrototypePollution:    "Object.prototype[%s] === %s",
+	KeyCheckJWTWeakSecretTitle:       "JSON Web Token signed with a recoverable key",
+	KeyCheckJWTWeakSecretDesc:        "The token is signed with a secret that can be recovered from the token itself, or from a list of common keys, and the service accepted a token re-signed with it. Anyone who has that key can mint a token for any identity the application recognises — the signature is doing no work, because the key it rests on is not a secret.",
+	KeyCheckJWTTitle:                 "JSON Web Token accepted without a valid signature",
 	KeyCheckJWTDesc: "A token whose signature was removed or whose algorithm was changed was " +
 		"accepted by the application. Anyone can then mint a token claiming any identity, which " +
 		"makes every authorisation decision downstream meaningless.",

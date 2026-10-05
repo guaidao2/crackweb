@@ -616,7 +616,20 @@ var chinese = map[Key]string{
 	KeyCheckXXEFix: "在所有 XML 解析器上关闭外部实体与 DTD 处理（如 LIBXML_NOENT 等），" +
 		"并优先选用不携带 schema 的数据格式。",
 
-	KeyCheckJWTTitle: "JSON Web Token 签名校验可被绕过",
+	KeyEvidenceJWTWeakSecretSameKey:  "该 token 就是用 %q 这个密钥签的，而服务端接受了它",
+	KeyEvidenceJWTWeakSecretReSigned: "已用 %q 这个密钥对 token 重新签名，服务端接受了结果",
+	KeyCheckJWTKidTitle:              "JSON Web Token 接受了由调用者指定的密钥标识符",
+	KeyCheckJWTKidDesc:               "token 的 kid 头在未经认证的情况下就被用来查验证密钥，因此一个指定了调用者所选密钥的 token（空文件，或从查询中读出的值）可以用该密钥签名并被接受。签名证明不了任何事，因为消息和密钥都是调用者选的。",
+	KeyCheckJWTConfusionTitle:        "JSON Web Token 把公钥当作 HMAC 密钥来验签",
+	KeyCheckJWTConfusionDesc:         "服务使用非对称签名，却接受一个在头部声明使用带密钥散列算法的 token。它用于验签的密钥是公钥，而公钥本就是公开的——因此任何人都能签出该服务接受的 token。决定权落在了头部的算法字段上，而那个字段由攻击者控制。",
+	KeyCheckJWTKeyURLTitle:           "JSON Web Token 接受了从 token 指定地址取回的密钥",
+	KeyCheckJWTKeyURLDesc:            "验证方按照 token 自身给出的地址（jku、jwk 或 x5u）去获取验证密钥，并接受了结果。任何能让请求走到验签环节的人，都可以把该地址指向自己的密钥文档，用配对的私钥签一个 token，然后被采信。",
+	KeyEvidencePoisonedURL:           "被污染的 URL 是 %s",
+	KeyEvidenceRenderedText:          "渲染后的页面包含 %s",
+	KeyEvidencePrototypePollution:    "Object.prototype[%s] === %s",
+	KeyCheckJWTWeakSecretTitle:       "JSON Web Token 的签名密钥可以被还原",
+	KeyCheckJWTWeakSecretDesc:        "该 token 的签名密钥可以从 token 自身、或从常见密钥列表中还原出来，而服务端接受了用它重新签名的 token。持有该密钥的人可以为应用认可的任意身份签发 token——签名没有起到作用，因为它的密钥并不保密。",
+	KeyCheckJWTTitle:                 "JSON Web Token 签名校验可被绕过",
 	KeyCheckJWTDesc: "应用接受了签名被移除、或算法被改写的 token。" +
 		"这样一来任何人都能伪造一个声称任意身份的 token，" +
 		"下游所有基于身份的授权判断也就都失去了意义。",

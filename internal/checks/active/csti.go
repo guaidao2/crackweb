@@ -110,7 +110,7 @@ func (csti) Run(ctx context.Context, c *checks.Context, t *checks.Target) []*fin
 				"the value reached a template compiler — the same input class that carries code " +
 					"in this compiler's syntax",
 			}
-			f.Evidence.Diff = "rendered text contains " + cstiProduct
+			f.Evidence.Diff = c.Bundle.T(i18n.KeyEvidenceRenderedText, cstiProduct)
 			return []*finding.Finding{f}
 		}
 	}

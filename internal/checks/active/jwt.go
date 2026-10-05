@@ -9,7 +9,6 @@ import (
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
-	"fmt"
 	"math/big"
 	"strings"
 	"time"
@@ -190,14 +189,14 @@ func jwtKnownSecret(ctx context.Context, c *checks.Context, t *checks.Target, fi
 			// accepted a token it signed. That is the strongest form of the finding rather
 			// than a reason to skip it: the exchange is proof, and a second request cannot
 			// add anything to it.
-			f := checks.NewFinding(jwt{}, t, i18n.KeyCheckJWTTitle, i18n.KeyCheckJWTDesc, i18n.KeyCheckJWTFix)
+			f := checks.NewFinding(jwt{}, t, i18n.KeyCheckJWTWeakSecretTitle, i18n.KeyCheckJWTWeakSecretDesc, i18n.KeyCheckJWTFix)
 			f.Param = field
 			f.Payload = secret
 			f.Severity = finding.SeverityCritical
 			f.Confidence = finding.ConfidenceCertain
 			f.DedupHostOnly = true
 			f.Evidence.Matches = []string{original}
-			f.Evidence.Diff = fmt.Sprintf("the token was signed with the supplied key %q, and the service accepted it", secret)
+			f.Evidence.Diff = c.Bundle.T(i18n.KeyEvidenceJWTWeakSecretSameKey, secret)
 			return f
 		}
 
@@ -228,14 +227,14 @@ func jwtKnownSecret(ctx context.Context, c *checks.Context, t *checks.Target, fi
 			continue
 		}
 
-		f := checks.NewFinding(jwt{}, t, i18n.KeyCheckJWTTitle, i18n.KeyCheckJWTDesc, i18n.KeyCheckJWTFix)
+		f := checks.NewFinding(jwt{}, t, i18n.KeyCheckJWTWeakSecretTitle, i18n.KeyCheckJWTWeakSecretDesc, i18n.KeyCheckJWTFix)
 		f.Param = field
 		f.Payload = secret
 		f.Severity = finding.SeverityCritical
 		f.Confidence = finding.ConfidenceCertain
 		f.DedupHostOnly = true
 		f.Evidence.Matches = []string{original, forged}
-		f.Evidence.Diff = fmt.Sprintf("re-signed with the key %q; the service accepted it", secret)
+		f.Evidence.Diff = c.Bundle.T(i18n.KeyEvidenceJWTWeakSecretReSigned, secret)
 		_ = claims
 		return f
 	}
@@ -358,7 +357,7 @@ func (jwt) kidInjection(ctx context.Context, c *checks.Context, t *checks.Target
 			continue
 		}
 		f := checks.NewFinding(jwt{}, t,
-			i18n.KeyCheckJWTTitle, i18n.KeyCheckJWTDesc, i18n.KeyCheckJWTFix)
+			i18n.KeyCheckJWTKidTitle, i18n.KeyCheckJWTKidDesc, i18n.KeyCheckJWTFix)
 		f.Severity = finding.SeverityCritical
 		f.Confidence = finding.ConfidenceCertain
 		f.Method = mutated.Method
@@ -468,7 +467,7 @@ func jwtAlgorithmConfusion(ctx context.Context, c *checks.Context, t *checks.Tar
 			}
 
 			f := checks.NewFinding(jwt{}, t,
-				i18n.KeyCheckJWTTitle, i18n.KeyCheckJWTDesc, i18n.KeyCheckJWTFix)
+				i18n.KeyCheckJWTConfusionTitle, i18n.KeyCheckJWTConfusionDesc, i18n.KeyCheckJWTFix)
 			f.Severity = finding.SeverityCritical
 			f.Confidence = finding.ConfidenceCertain
 			f.Method = mutated.Method
@@ -627,7 +626,7 @@ func jwtKeyURL(ctx context.Context, c *checks.Context, t *checks.Target, field, 
 				continue
 			}
 			f := checks.NewFinding(jwt{}, t,
-				i18n.KeyCheckJWTTitle, i18n.KeyCheckJWTDesc, i18n.KeyCheckJWTFix)
+				i18n.KeyCheckJWTKeyURLTitle, i18n.KeyCheckJWTKeyURLDesc, i18n.KeyCheckJWTFix)
 			f.Severity = finding.SeverityHigh
 			f.Confidence = finding.ConfidenceCertain
 			f.Method = "GET"
