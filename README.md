@@ -78,20 +78,40 @@ The same applies to reports: a scan run with `--lang zh` produces a Chinese repo
 | `scan` | Scan a single target, or a raw HTTP request saved from another tool |
 | `oob` | Run the out-of-band interaction server (DNS and HTTP callbacks) |
 | `ca` | Create, inspect and export the CA certificate used for HTTPS interception |
-| `local` | Run an offline analysis on something you already have — nothing is sent |
+| `local` | Run an offline analysis on something you already have: JWTs, hashes — nothing is sent |
 
-Offline analyses take an artifact rather than a target. The first is a JSON Web Token:
+Offline analyses take an artifact rather than a target — a token, a hash — and nothing is sent
+anywhere. `crackweb local` lists them; each has its own options.
+
+**JSON Web Tokens**
 
 ```sh
-crackweb local jwt "<token>"                 # decode it, and try the built-in secret list
-crackweb local jwt "<token>" -w words.txt    # ...alongside your own wordlist
+crackweb local jwt "<token>"                            # decode, and try the built-in secret list
+crackweb local jwt "<token>" -w words.txt               # ...alongside your own wordlist
+crackweb local jwt "<token>" -s "<key>" --forge \
+  --claim role=admin --claim is_admin=true              # sign a token of your own
 ```
 
-Every guess is arithmetic on a token you already hold: no request is made, so there is no
+Every guess is arithmetic on something you already hold: no request is made, so there is no
 target to lock out and no log to fill. Candidates come from the built-in list, from your
 wordlist, and from the token's own claims — `iss: "NeuraTech-OA"` suggests `NeuraTech2024`,
-which no general wordlist carries. A secret that reproduces the signature is reported, with
-the finding that anyone holding it can mint a token for any identity.
+which no general wordlist carries. A secret that reproduces the signature is reported, with the
+finding that anyone holding it can mint a token for any identity. `--forge` then answers the
+question that follows: what can be issued with that key. Values written as `true`, `42` or
+`{"a":1}` take that type.
+
+**Hashes**
+
+```sh
+crackweb local hash 5f4dcc3b5aa765d61d8327deb882cf99        # identify, and try the wordlist
+crackweb local hash "$2y$10$..." -w rockyou.txt             # identify only: bcrypt is salted
+```
+
+Identification stands on its own, and the answer can be a list: 32 hex digits are MD5, NTLM or
+MD4, and only context tells them apart. Where a plain digest is involved the built-in password
+list and your wordlist are tried against it. Salted and deliberately slow algorithms (bcrypt,
+argon2, scrypt, crypt(3), PBKDF2) are named and left alone — reproducing them needs the salt and
+a parameterised implementation, and guessing at bcrypt is not what an offline mode is for.
 
 `crackweb <command> --help` documents every option; `crackweb scan --list-checks` lists
 the available checks.

@@ -147,3 +147,53 @@ func TestExpiryIsReadFromTheClaims(t *testing.T) {
 		t.Errorf("expiry %v is not in the past", expiry)
 	}
 }
+
+// TestForgeReplacesAClaimAndStillVerifies is the last step of the discovery: the secret is
+// known, and what it can issue is the question.
+func TestForgeReplacesAClaimAndStillVerifies(t *testing.T) {
+	raw := sign(t, "secret", map[string]any{"user_id": float64(34), "role": "employee"})
+	token, err := Parse(raw)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	forged, err := token.Forge([]byte("secret"), map[string]any{"role": "admin"})
+	if err != nil {
+		t.Fatalf("Forge: %v", err)
+	}
+	if forged == raw {
+		t.Fatal("forging changed nothing")
+	}
+	parsed, err := Parse(forged)
+	if err != nil {
+		t.Fatalf("the forged token is not a token: %v", err)
+	}
+	if parsed.Claims["role"] != "admin" {
+		t.Errorf("role = %v, want admin", parsed.Claims["role"])
+	}
+	if parsed.Claims["user_id"] != float64(34) {
+		t.Errorf("user_id = %v, want it carried over", parsed.Claims["user_id"])
+	}
+	if !parsed.VerifyHMAC([]byte("secret")) {
+		t.Error("the forged token does not verify under the secret that made it")
+	}
+	if parsed.VerifyHMAC([]byte("other")) {
+		t.Error("the forged token verifies under a different secret")
+	}
+}
+
+// TestClaimFromValueReadsWhatPeopleWrite keeps `role=admin` and `is_admin=true` from both
+// becoming the string "admin"/"true", which no service would match.
+func TestClaimFromValueReadsWhatPeopleWrite(t *testing.T) {
+	if got := ClaimFromValue("admin"); got != "admin" {
+		t.Errorf("bare value = %#v, want the string", got)
+	}
+	if got := ClaimFromValue("true"); got != true {
+		t.Errorf("true = %#v, want the boolean", got)
+	}
+	if got := ClaimFromValue("42"); got != float64(42) {
+		t.Errorf("42 = %#v, want the number", got)
+	}
+	if got := ClaimFromValue(`{"a":1}`); got == nil {
+		t.Error("a JSON document was not parsed")
+	}
+}

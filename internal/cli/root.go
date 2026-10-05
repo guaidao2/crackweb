@@ -147,6 +147,12 @@ type command struct {
 	flagSet func(*App) *FlagSet
 	// execute parses the arguments and runs the command.
 	execute func(*App, []string) error
+
+	// subcommands are commands that live under this one, for a tool whose work divides into
+	// subjects rather than flags. A command with subcommands dispatches to one of them; the
+	// subjects keep their own options and their own help, which is the point — a shared option
+	// set would document flags that most subjects do not take.
+	subcommands []*command
 }
 
 // newCommand wires a typed option struct to the generic command plumbing, so
@@ -228,6 +234,21 @@ func (a *App) Run(args []string) int {
 		a.Fail(i18n.KeyErrUnknownCommand, args[0])
 		fmt.Fprintln(a.Stderr, a.T(i18n.KeyHelpSubcommandHint))
 		return ExitUsage
+	}
+
+	// A command that carries subcommands hands the next word to one of them, so the subject
+	// parses its own options and answers its own --help.
+	if len(cmd.subcommands) > 0 && len(args) > 1 {
+		for _, sub := range cmd.subcommands {
+			if sub.name == args[1] {
+				return a.execute(sub, args[2:])
+			}
+		}
+		if !strings.HasPrefix(args[1], "-") {
+			a.Fail(i18n.KeyErrUnknownCommand, args[1])
+			fmt.Fprintln(a.Stderr, a.T(i18n.KeyHelpSubcommandHint))
+			return ExitUsage
+		}
 	}
 	return a.execute(cmd, args[1:])
 }

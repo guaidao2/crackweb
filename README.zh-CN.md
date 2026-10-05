@@ -70,19 +70,37 @@ CRACKWEB_LANG=zh crackweb --help  # 通过环境变量达到同样效果
 | `scan` | 扫描单个目标，或一份其它工具保存下来的原始 HTTP 请求 |
 | `oob` | 启动带外交互服务器（DNS 与 HTTP 回调） |
 | `ca` | 创建、查看并导出用于 HTTPS 拦截的 CA 证书 |
-| `local` | 对已有的物件做离线分析——不发送任何流量 |
+| `local` | 对已有的物件做离线分析：JWT、hash——不发送任何流量 |
 
-离线分析接收的是物件本身，而不是目标。第一个是 JSON Web Token：
+离线分析接收的是物件本身（一个 token、一个 hash），不向任何地方发送流量。`crackweb local`
+会列出全部子命令，每个子命令有自己的选项。
+
+**JSON Web Token**
 
 ```sh
-crackweb local jwt "<token>"                 # 解码，并用内置密钥列表尝试
-crackweb local jwt "<token>" -w words.txt    # 同时试你自己的字典
+crackweb local jwt "<token>"                            # 解码，并用内置密钥列表尝试
+crackweb local jwt "<token>" -w words.txt               # 同时试你自己的字典
+crackweb local jwt "<token>" -s "<密钥>" --forge \
+  --claim role=admin --claim is_admin=true              # 用密钥签出你自己的 token
 ```
 
-每一次猜测都是对你手上这个 token 做运算：不发请求，因此不存在锁账号或污染日志的问题。
-候选来自内置列表、你的字典，以及 token 自身的声明——`iss: "NeuraTech-OA"` 能推出
-`NeuraTech2024`，而任何通用字典都不会收录它。能还原签名的密钥会被报出，并说明持有它
-的人可以为任意身份伪造 token。
+每一次猜测都是对你手上这个物件做运算：不发请求，因此不存在锁账号或污染日志的问题。候选
+来自内置列表、你的字典，以及 token 自身的声明——`iss: "NeuraTech-OA"` 能推出
+`NeuraTech2024`，而任何通用字典都不会收录它。能还原签名的密钥会被报出，并说明持有它的人
+可以为任意身份伪造 token。`--forge` 回答随之而来的问题：拿这个密钥能签出什么。值写成
+`true`、`42` 或 `{"a":1}` 时按对应类型处理。
+
+**Hash**
+
+```sh
+crackweb local hash 5f4dcc3b5aa765d61d8327deb882cf99        # 识别，并用字典尝试
+crackweb local hash "$2y$10$..." -w rockyou.txt             # 只识别：bcrypt 带盐
+```
+
+识别本身就有价值，而且答案可能是一组：32 位 hex 可能是 MD5、NTLM 或 MD4，只有上下文能
+区分。若是无盐摘要，内置口令表与你的字典都会拿上去试。带盐或刻意变慢的算法（bcrypt、
+argon2、scrypt、crypt(3)、PBKDF2）只报出身份、不做尝试——复现它们需要盐和一个参数化的
+实现，而猜 bcrypt 不是离线模式该做的事。
 
 `crackweb <子命令> --help` 里有每个选项的说明；`crackweb scan --list-checks` 列出全部检测项。
 
