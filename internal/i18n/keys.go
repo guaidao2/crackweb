@@ -14,6 +14,7 @@ const (
 	KeyHelpUsageLine       Key = "help.usage-line"
 	KeyHelpCommandsTitle   Key = "help.commands-title"
 	KeyHelpOptionsTitle    Key = "help.options-title"
+	KeyHelpSubjectsTitle   Key = "help.subjects.title"
 	KeyHelpCmdOptionsTitle Key = "help.command-options-title"
 	KeyHelpExamplesTitle   Key = "help.examples-title"
 	KeyHelpExamples        Key = "help.examples"

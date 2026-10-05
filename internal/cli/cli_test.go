@@ -276,3 +276,40 @@ func TestHelpIsTranslatedConsistently(t *testing.T) {
 		})
 	}
 }
+
+// TestContainerCommandHelpListsItsSubjects covers the defect this test was added for: `local`
+// carries its work in subcommands and has no options of its own, so its help rendered a usage
+// line and nothing else — the one thing a reader needs was the one thing missing.
+func TestContainerCommandHelpListsItsSubjects(t *testing.T) {
+	for _, args := range [][]string{{"local", "--help"}, {"local"}} {
+		_, stdout, _ := run(t, args...)
+
+		for _, want := range []string{"jwt", "hash"} {
+			if !strings.Contains(stdout, want) {
+				t.Errorf("%v: the subject %q is not listed:\n%s", args, want, stdout)
+			}
+		}
+		// A subject has to be described, not merely named.
+		if !strings.Contains(stdout, "JSON Web Token") {
+			t.Errorf("%v: the subjects carry no description:\n%s", args, stdout)
+		}
+	}
+}
+
+// TestSubjectHelpIsTheSubjectsOwn is the other half: asking a subject for help must show the
+// options that subject takes, not the ones its parent has.
+func TestSubjectHelpIsTheSubjectsOwn(t *testing.T) {
+	_, jwtHelp, _ := run(t, "local", "jwt", "--help")
+	if !strings.Contains(jwtHelp, "--forge") || !strings.Contains(jwtHelp, "--wordlist") {
+		t.Errorf("local jwt --help does not list its own options:\n%s", jwtHelp)
+	}
+
+	_, hashHelp, _ := run(t, "local", "hash", "--help")
+	if !strings.Contains(hashHelp, "--wordlist") {
+		t.Errorf("local hash --help does not list its options:\n%s", hashHelp)
+	}
+	// The hash subject has no use for a signing key, so it must not advertise one.
+	if strings.Contains(hashHelp, "--forge") {
+		t.Errorf("local hash --help shows an option that belongs to jwt:\n%s", hashHelp)
+	}
+}

@@ -11,6 +11,7 @@ var english = map[Key]string{
 	KeyHelpUsageLine:       "crackweb [global options] <command> [command options]",
 	KeyHelpCommandsTitle:   "COMMANDS",
 	KeyHelpOptionsTitle:    "GLOBAL OPTIONS",
+	KeyHelpSubjectsTitle:   "SUBJECTS",
 	KeyHelpCmdOptionsTitle: "OPTIONS",
 	KeyHelpExamplesTitle:   "EXAMPLES",
 	KeyHelpSubcommandHint:  "Run 'crackweb <command> --help' for options specific to a command.",

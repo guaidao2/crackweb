@@ -77,6 +77,17 @@ func (a *App) commandHelp(cmd *command) string {
 	b.WriteString(a.section(i18n.KeyHelpUsage))
 	fmt.Fprintf(&b, "  %s\n\n", a.commandUsageLine(cmd))
 
+	// A command that carries subcommands lists them: its own option set is empty by design, so
+	// without this the help would say how to call it and nothing about what it does. This is
+	// the same list `local` prints when it is run without a subject.
+	if len(cmd.subcommands) > 0 {
+		b.WriteString(a.section(i18n.KeyHelpSubjectsTitle))
+		for _, subject := range cmd.subcommands {
+			fmt.Fprintf(&b, "  %-12s %s\n", subject.name, a.T(subject.summary))
+		}
+		b.WriteByte('\n')
+	}
+
 	if help := cmd.flagSet(a).Help(); help != "" {
 		b.WriteString(a.section(i18n.KeyHelpCmdOptionsTitle))
 		b.WriteString(help)

@@ -11,6 +11,7 @@ var chinese = map[Key]string{
 	KeyHelpUsageLine:       "crackweb [全局选项] <子命令> [子命令选项]",
 	KeyHelpCommandsTitle:   "子命令",
 	KeyHelpOptionsTitle:    "全局选项",
+	KeyHelpSubjectsTitle:   "子命令",
 	KeyHelpCmdOptionsTitle: "选项",
 	KeyHelpExamplesTitle:   "示例",
 	KeyHelpSubcommandHint:  "执行 'crackweb <子命令> --help' 查看该子命令的选项。",
