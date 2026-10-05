@@ -94,7 +94,7 @@ func (jwt) Run(ctx context.Context, c *checks.Context, t *checks.Target) []*find
 		}
 		// The same request succeeded with a token nobody signed: the application
 		// is not verifying, and the credential means nothing.
-		if !jwtAccepted(response) {
+		if !jwtAccepted(response, t.Response) {
 			continue
 		}
 
@@ -103,10 +103,12 @@ func (jwt) Run(ctx context.Context, c *checks.Context, t *checks.Target) []*find
 		// what accepting an unsigned token looks like from the outside — and reporting it
 		// would call every page that ignores Authorization a broken JWT implementation. Ask
 		// once without the credential: if that succeeds too, the token proved nothing.
+		// Sent with the credential taken off and no configured credential put back: a control
+		// that carries the identity cannot show that the identity is required.
 		uncredentialed := t.Request.Clone()
 		uncredentialed.Header.Del(field)
-		freeResponse, err := c.Do(ctx, uncredentialed)
-		if err == nil && freeResponse != nil && jwtAccepted(freeResponse) {
+		freeResponse, err := c.DoWithoutCredentials(ctx, uncredentialed)
+		if err == nil && freeResponse != nil && jwtAccepted(freeResponse, t.Response) {
 			continue
 		}
 
@@ -205,16 +207,19 @@ func jwtKnownSecret(ctx context.Context, c *checks.Context, t *checks.Target, fi
 		mutated := t.Request.Clone()
 		mutated.Header.Set(field, replaceToken(t.Request.Header.Get(field), original, forged))
 		response, err := c.Do(ctx, mutated)
-		if err != nil || response == nil || !jwtAccepted(response) {
+		if err != nil || response == nil || !jwtAccepted(response, t.Response) {
 			continue
 		}
 
 		// The control this check uses everywhere: an endpoint that never looks at the
 		// credential answers to anything, and that weakness — if it is one — is what the
-		// alg=none attempts above report.
+		// alg=none attempts above report. It has to reach the server without an identity, so
+		// it goes through the anonymous path: deleting the header and calling Do lets the
+		// client's configured credential be restored, and a control that authenticates
+		// always succeeds.
 		control := t.Request.Clone()
 		control.Header.Del(field)
-		if unauthenticated, err := c.Do(ctx, control); err == nil && unauthenticated != nil && jwtAccepted(unauthenticated) {
+		if unauthenticated, err := c.DoWithoutCredentials(ctx, control); err == nil && unauthenticated != nil && jwtAccepted(unauthenticated, t.Response) {
 			continue
 		}
 
@@ -223,7 +228,7 @@ func jwtKnownSecret(ctx context.Context, c *checks.Context, t *checks.Target, fi
 		wrong := local.SignWith(headerAlgorithm(header), parts[0]+"."+parts[1], []byte(secret+"x"))
 		sanity := t.Request.Clone()
 		sanity.Header.Set(field, replaceToken(t.Request.Header.Get(field), original, wrong))
-		if mistaken, err := c.Do(ctx, sanity); err == nil && mistaken != nil && jwtAccepted(mistaken) {
+		if mistaken, err := c.Do(ctx, sanity); err == nil && mistaken != nil && jwtAccepted(mistaken, t.Response) {
 			continue
 		}
 
@@ -295,19 +300,36 @@ func tamperSignature(signature string) string {
 	return base64.RawURLEncoding.EncodeToString(forged)
 }
 
-// jwtAccepted reports whether the application treated the request as
-// authenticated: a success status and a body that does not say otherwise.
-func jwtAccepted(response *httpmsg.Response) bool {
+// jwtAccepted reports whether the application treated the request the same way it treated the
+// one whose credential it issued.
+//
+// The comparison is with the accepted baseline, not with a list of words that look like
+// rejection. That list was wrong, and wrong in the way that hides a real vulnerability: a
+// service whose data happens to contain "invalid" — a test account's address,
+// `someone@invalid.local` — answered a forged token exactly as it answered a good one, and the
+// word made the check call it a rejection. Data is not a verdict.
+//
+// What a rejection actually looks like is a different answer: a 401, or a body of a different
+// size and shape. Both are visible against the baseline without reading any meaning into it.
+func jwtAccepted(response, baseline *httpmsg.Response) bool {
 	if response == nil || response.Status >= 400 {
 		return false
 	}
-	lower := strings.ToLower(string(response.Body))
-	for _, word := range []string{"invalid", "unauthorized", "forbidden", "expired", "denied"} {
-		if strings.Contains(lower, word) {
-			return false
-		}
+	if baseline == nil || baseline.Status >= 400 {
+		// Nothing to compare against; the status is all there is.
+		return true
 	}
-	return true
+	if response.Status != baseline.Status {
+		return false
+	}
+	// An answer of a very different size is a different answer. A rejection is usually a short
+	// error object where the accepted response was a page or a result set.
+	accepted, answer := len(baseline.Body), len(response.Body)
+	if accepted == 0 {
+		return answer == 0
+	}
+	ratio := float64(answer) / float64(accepted)
+	return ratio >= 0.5 && ratio <= 2.0
 }
 
 // signJWT builds a token from a header and a payload, signed with HMAC-SHA256.
@@ -340,7 +362,7 @@ func (jwt) kidInjection(ctx context.Context, c *checks.Context, t *checks.Target
 		return mutated, response
 	}
 
-	if _, control := mutate(parts[0] + "." + parts[1] + "." + tamperSignature(parts[2])); jwtAccepted(control) {
+	if _, control := mutate(parts[0] + "." + parts[1] + "." + tamperSignature(parts[2])); jwtAccepted(control, t.Response) {
 		return nil
 	}
 
@@ -353,7 +375,7 @@ func (jwt) kidInjection(ctx context.Context, c *checks.Context, t *checks.Target
 		forged := signJWT(forgedHeader, payload, spelling.key)
 
 		mutated, response := mutate(forged)
-		if !jwtAccepted(response) {
+		if !jwtAccepted(response, t.Response) {
 			continue
 		}
 		f := checks.NewFinding(jwt{}, t,
@@ -444,7 +466,7 @@ func jwtAlgorithmConfusion(ctx context.Context, c *checks.Context, t *checks.Tar
 		}
 		return mutated, response
 	}
-	if _, control := mutate(parts[0] + "." + parts[1] + "." + tamperSignature(parts[2])); jwtAccepted(control) {
+	if _, control := mutate(parts[0] + "." + parts[1] + "." + tamperSignature(parts[2])); jwtAccepted(control, t.Response) {
 		return nil
 	}
 
@@ -462,7 +484,7 @@ func jwtAlgorithmConfusion(ctx context.Context, c *checks.Context, t *checks.Tar
 			forged := signJWT(forgedHeader, payload, key)
 
 			mutated, response := mutate(forged)
-			if !jwtAccepted(response) {
+			if !jwtAccepted(response, t.Response) {
 				continue
 			}
 

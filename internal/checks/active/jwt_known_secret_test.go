@@ -113,3 +113,44 @@ func TestJWTAKnownSecretNeedsNoFlagToBehaveAsBefore(t *testing.T) {
 		t.Errorf("the check reported without --jwt-secret: %v", findings[0].Evidence)
 	}
 }
+
+// TestJWTAcceptanceIsNotDecidedByWordsInTheData is the regression test for a real miss.
+//
+// The judge used to call a response a rejection when its body contained "invalid",
+// "unauthorized" and friends. A service whose result set contains one of those words — an
+// address like `someone@invalid.local` — answered a forged token exactly as it answered a good
+// one, and the word made the check discard the finding. It discarded a genuine alg=none
+// acceptance on a real target.
+func TestJWTAcceptanceIsNotDecidedByWordsInTheData(t *testing.T) {
+	baseline := &httpmsg.Response{
+		Status: 200,
+		Body:   []byte(`{"users":[{"id":1,"username":"admin","email":"hf0902_59223a@invalid.local","role":"admin"}],"ok":true}`),
+	}
+	// The same answer, because the service accepted the forged token.
+	same := &httpmsg.Response{Status: 200, Body: baseline.Body}
+	if !jwtAccepted(same, baseline) {
+		t.Error("an accepted answer was called a rejection because the data contains the word invalid")
+	}
+
+	// A real rejection is a different answer: a 401, or a short error object.
+	if jwtAccepted(&httpmsg.Response{Status: 401, Body: []byte(`{"error":"invalid token"}`)}, baseline) {
+		t.Error("a 401 was treated as acceptance")
+	}
+	if jwtAccepted(&httpmsg.Response{Status: 200, Body: []byte(`{"error":"invalid token"}`)}, baseline) {
+		t.Error("a short error body was treated as acceptance")
+	}
+}
+
+// TestJWTAcceptanceNeedsABaselineAndAStatus keeps the shape of the comparison honest.
+func TestJWTAcceptanceNeedsABaselineAndAStatus(t *testing.T) {
+	if jwtAccepted(nil, nil) {
+		t.Error("a missing response was accepted")
+	}
+	if jwtAccepted(&httpmsg.Response{Status: 500}, &httpmsg.Response{Status: 200}) {
+		t.Error("a 500 was accepted")
+	}
+	// Without a usable baseline the status is all there is.
+	if !jwtAccepted(&httpmsg.Response{Status: 200, Body: []byte("x")}, nil) {
+		t.Error("a 200 with no baseline was rejected")
+	}
+}

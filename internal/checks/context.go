@@ -146,6 +146,11 @@ func (c *Context) FailureCount() int {
 
 // Do sends a request and counts it.
 func (c *Context) Do(ctx context.Context, req *httpmsg.Request) (*httpmsg.Response, error) {
+	return c.do(ctx, req, false)
+}
+
+// do sends a request, optionally with the configured credentials left off.
+func (c *Context) do(ctx context.Context, req *httpmsg.Request, anonymous bool) (*httpmsg.Response, error) {
 	c.mu.Lock()
 	c.requests++
 	watch := c.OnRequest
@@ -158,7 +163,13 @@ func (c *Context) Do(ctx context.Context, req *httpmsg.Request) (*httpmsg.Respon
 		watch(req)
 	}
 
-	resp, err := c.Client.Do(ctx, req)
+	var resp *httpmsg.Response
+	var err error
+	if anonymous {
+		resp, err = c.Client.DoAnonymous(ctx, req)
+	} else {
+		resp, err = c.Client.Do(ctx, req)
+	}
 	if err != nil && ctx.Err() == nil {
 		c.mu.Lock()
 		// Bound the list: a target that is down would otherwise fill memory
@@ -215,8 +226,19 @@ func (c *Context) DoWithSession(ctx context.Context, req *httpmsg.Request, sessi
 
 // DoWithoutSession sends a request with every identity removed, which is how a
 // check establishes whether an object is protected at all.
+//
+// Striping the headers is only half of it: the client puts its configured credentials back on
+// any request that does not name its own, so removing them and calling Do produced a control
+// that still authenticated — and a control that authenticates says the resource is protected
+// when it is not. The anonymous path is what makes the removal hold.
 func (c *Context) DoWithoutSession(ctx context.Context, req *httpmsg.Request) (*httpmsg.Response, error) {
-	return c.Do(ctx, withoutAuth(req))
+	return c.do(ctx, withoutAuth(req), true)
+}
+
+// DoWithoutCredentials sends the request as it stands — no session added — with the client's
+// configured credentials left off, so it reaches the server as nobody in particular.
+func (c *Context) DoWithoutCredentials(ctx context.Context, req *httpmsg.Request) (*httpmsg.Response, error) {
+	return c.do(ctx, req, true)
 }
 
 // withoutAuth returns a copy of a request with its credentials stripped.

@@ -168,6 +168,21 @@ func parseProxy(raw string) (*url.URL, error) {
 // returned as an error; an HTTP error status is a perfectly good response and
 // comes back as one.
 func (c *Client) Do(ctx context.Context, req *httpmsg.Request) (*httpmsg.Response, error) {
+	return c.do(ctx, req, false)
+}
+
+// DoAnonymous sends a request without the configured credentials.
+//
+// It exists for the control a check runs against its own finding: to show that a resource is
+// protected, the same request has to be sent with the identity removed. Deleting the header
+// and calling Do is not enough — Do puts it back, because a configured credential is a default
+// for requests that do not name one. The result is a control that authenticates, succeeds, and
+// quietly cancels the finding it was meant to support.
+func (c *Client) DoAnonymous(ctx context.Context, req *httpmsg.Request) (*httpmsg.Response, error) {
+	return c.do(ctx, req, true)
+}
+
+func (c *Client) do(ctx context.Context, req *httpmsg.Request, anonymous bool) (*httpmsg.Response, error) {
 	var lastErr error
 	attempts := c.opts.Retry + 1
 
@@ -183,7 +198,7 @@ func (c *Client) Do(ctx context.Context, req *httpmsg.Request) (*httpmsg.Respons
 		if err := c.limiter.Wait(ctx); err != nil {
 			return nil, err
 		}
-		resp, err := c.attempt(ctx, req)
+		resp, err := c.attempt(ctx, req, anonymous)
 		if err == nil {
 			return resp, nil
 		}
@@ -196,7 +211,7 @@ func (c *Client) Do(ctx context.Context, req *httpmsg.Request) (*httpmsg.Respons
 }
 
 // attempt performs a single request/response exchange.
-func (c *Client) attempt(ctx context.Context, req *httpmsg.Request) (*httpmsg.Response, error) {
+func (c *Client) attempt(ctx context.Context, req *httpmsg.Request, anonymous bool) (*httpmsg.Response, error) {
 	// A request may carry its own deadline; see httpmsg.Request.Timeout. It is
 	// applied here rather than in buildRequest so the cancel can be deferred
 	// until the response has been read — releasing it earlier would cut the
@@ -213,7 +228,7 @@ func (c *Client) attempt(ctx context.Context, req *httpmsg.Request) (*httpmsg.Re
 		defer cancel()
 	}
 
-	httpReq, err := c.buildRequest(ctx, req)
+	httpReq, err := c.buildRequest(ctx, req, anonymous)
 	if err != nil {
 		return nil, err
 	}
@@ -259,7 +274,7 @@ func (c *Client) attempt(ctx context.Context, req *httpmsg.Request) (*httpmsg.Re
 
 // buildRequest converts a message-model request into the standard library's
 // representation, preserving the Host field and adding client defaults.
-func (c *Client) buildRequest(ctx context.Context, req *httpmsg.Request) (*http.Request, error) {
+func (c *Client) buildRequest(ctx context.Context, req *httpmsg.Request, anonymous bool) (*http.Request, error) {
 	if req == nil || req.URL == nil {
 		return nil, errors.New("httpclient: request has no URL")
 	}
@@ -297,7 +312,12 @@ func (c *Client) buildRequest(ctx context.Context, req *httpmsg.Request) (*http.
 		httpReq.Header.Set("Accept", "*/*")
 	}
 
-	c.applyCredentials(httpReq, req)
+	// An anonymous request is exactly what it says: the credentials stay off it. That matters
+	// for the control a check runs to establish whether a resource is protected at all — a
+	// control that carries the credential proves the opposite of what it is for.
+	if !anonymous {
+		c.applyCredentials(httpReq, req)
+	}
 
 	return httpReq, nil
 }

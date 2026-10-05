@@ -532,7 +532,7 @@ func TestCredentialsDoNotOverwriteTheRequestsOwnIdentity(t *testing.T) {
 	}
 	req.Header.Set("Authorization", "Bearer specific")
 
-	httpReq, err := client.buildRequest(context.Background(), req)
+	httpReq, err := client.buildRequest(context.Background(), req, false)
 	if err != nil {
 		t.Fatalf("buildRequest: %v", err)
 	}
@@ -541,5 +541,59 @@ func TestCredentialsDoNotOverwriteTheRequestsOwnIdentity(t *testing.T) {
 	}
 	if got := httpReq.Header.Get("Authorization"); got != "Bearer specific" {
 		t.Errorf("the wire request's identity was overwritten with %q", got)
+	}
+}
+
+// TestAnAnonymousRequestStaysAnonymous is the regression test for a control that cancelled its
+// own findings.
+//
+// A check proves a resource is protected by sending the request again without the identity.
+// Deleting the header and calling Do is not enough: a configured credential is a default for
+// any request that does not name one, so Do puts it straight back. The control then
+// authenticates, succeeds, and quietly discards the finding it exists to support — which is how
+// a real alg=none acceptance went unreported in crawl mode while single-URL scans (whose path
+// left no credential to restore) reported it.
+func TestAnAnonymousRequestStaysAnonymous(t *testing.T) {
+	var seen []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seen = append(seen, r.Header.Get("Authorization"))
+		if r.Header.Get("Authorization") == "" {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		fmt.Fprint(w, `{"ok":true}`)
+	}))
+	t.Cleanup(server.Close)
+
+	client, err := New(Options{Credentials: []Credential{{Name: "Authorization", Value: "Bearer configured"}}})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	req, err := httpmsg.NewRequest("GET", server.URL+"/api/thing")
+	if err != nil {
+		t.Fatalf("NewRequest: %v", err)
+	}
+	req.Header.Set("Authorization", "Bearer configured")
+
+	// The normal path authenticates.
+	if _, err := client.Do(context.Background(), req); err != nil {
+		t.Fatalf("Do: %v", err)
+	}
+	// The anonymous path must not, however the request was prepared.
+	stripped := req.Clone()
+	stripped.Header.Del("Authorization")
+	if _, err := client.DoAnonymous(context.Background(), stripped); err != nil {
+		t.Fatalf("DoAnonymous: %v", err)
+	}
+
+	if len(seen) != 2 {
+		t.Fatalf("expected two requests, saw %d", len(seen))
+	}
+	if seen[0] == "" {
+		t.Error("the authenticated request carried no credential")
+	}
+	if seen[1] != "" {
+		t.Errorf("the anonymous request carried %q: the credential was restored", seen[1])
 	}
 }
