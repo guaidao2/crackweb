@@ -11,6 +11,12 @@ permissions:
 jobs:
   release:
     runs-on: ubuntu-latest
+    env:
+      # The exact toolchain every published binary is built with. go.mod's
+      # toolchain line is only a floor (Go keeps a newer local toolchain), so
+      # the pin has to be explicit here. The verify step below checks the
+      # artifact, not this variable.
+      GOTOOLCHAIN: go1.26.4
     steps:
       - uses: actions/checkout@v4
 
@@ -28,9 +34,41 @@ jobs:
       - name: Build archives for every platform
         run: make release
 
+      # Check the artifact rather than the environment: a release built by the
+      # wrong toolchain, or carrying a version other than the tag, fails here
+      # instead of being published.
+      - name: Verify the artifact
+        run: |
+          set -eu
+
+          want_toolchain=$(sed -n 's/^toolchain[[:space:]]\+\(go[0-9.]\+\)$/\1/p' go.mod)
+          if [ -z "$want_toolchain" ]; then
+            echo "go.mod does not pin a toolchain; see the note in release.yml"
+            exit 1
+          fi
+
+          version=$(sed -n 's/^[[:space:]]*Version[[:space:]]*=[[:space:]]*"\(.*\)"/\1/p' internal/version/version.go)
+          stem="crackweb_${version}_linux_amd64"
+          tar -xzf "dist/${stem}.tar.gz" -C /tmp
+
+          got_toolchain=$(go version -m "/tmp/${stem}/crackweb" | awk -F': ' 'NR==1 {print $2}')
+          echo "artifact built by ${got_toolchain}, want ${want_toolchain}"
+          if [ "$got_toolchain" != "$want_toolchain" ]; then
+            echo "the artifact was not built by the pinned toolchain"
+            exit 1
+          fi
+
+          reported=$(/tmp/${stem}/crackweb version | head -1 | awk '{print $2}')
+          echo "artifact reports ${reported}"
+          if [ "${GITHUB_REF_TYPE}" = "tag" ] && [ "v${reported#v}" != "${GITHUB_REF_NAME}" ]; then
+            echo "the artifact's version does not match the tag ${GITHUB_REF_NAME}"
+            exit 1
+          fi
+
       - name: Publish the release
         uses: softprops/action-gh-release@v2
         with:
+          name: crackweb ${{ github.ref_name }}
           files: |
             dist/*.tar.gz
             dist/*.zip

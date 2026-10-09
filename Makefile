@@ -5,6 +5,11 @@ BINARY   := crackweb
 BIN_DIR  := bin
 DIST_DIR := dist
 
+# The toolchain every published binary is built with, so a release can be
+# reproduced from the source. Pinned here as well as in the release workflow: a
+# build by any other patch release is a different binary from the same source.
+TOOLCHAIN := go1.26.4
+
 # Single source of truth: read the version straight out of internal/version.
 VERSION := $(shell sed -n 's/^[[:space:]]*Version[[:space:]]*=[[:space:]]*"\(.*\)"/\1/p' internal/version/version.go)
 
@@ -23,7 +28,7 @@ all: build
 ## build: compile the binary for the current platform into bin/
 build:
 	@mkdir -p $(BIN_DIR)
-	go build $(GOFLAGS) -ldflags "$(LDFLAGS)" -o $(BIN_DIR)/$(BINARY) ./cmd/crackweb
+	GOTOOLCHAIN=$(TOOLCHAIN) go build $(GOFLAGS) -ldflags "$(LDFLAGS)" -o $(BIN_DIR)/$(BINARY) ./cmd/crackweb
 
 ## test: run the full unit test suite
 test:
@@ -59,6 +64,7 @@ release:
 		name="$(BINARY)_$(VERSION)_$${os}_$${arch}"; \
 		printf '==> building %-8s %-6s\n' "$$os" "$$arch"; \
 		CGO_ENABLED=0 GOOS=$$os GOARCH=$$arch \
+			GOTOOLCHAIN=$(TOOLCHAIN) \
 			go build $(GOFLAGS) -ldflags "$(LDFLAGS)" -o "$(DIST_DIR)/$$name/$(BINARY)$$ext" ./cmd/crackweb ; \
 		cp README.md "$(DIST_DIR)/$$name/"; \
 		cp README.zh-CN.md "$(DIST_DIR)/$$name/"; \

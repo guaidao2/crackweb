@@ -9,6 +9,10 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    env:
+      # The same toolchain the release is built with, so a check that passes
+      # here cannot fail in the release job for a toolchain reason.
+      GOTOOLCHAIN: go1.26.4
     steps:
       - uses: actions/checkout@v4
 

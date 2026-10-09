@@ -2,6 +2,14 @@ module github.com/guaidao2/crackweb
 
 go 1.26.0
 
+// The toolchain the published binaries are built with. This line is a floor —
+// Go upgrades an older toolchain to it but keeps a newer local one — so the
+// exact pin for a release build is GOTOOLCHAIN, set by the release workflow and
+// by the Makefile's release target. A different patch release builds a
+// different binary from the same source, and the workflow checks the artifact
+// against this line rather than trusting the runner's default Go.
+toolchain go1.26.4
+
 require (
 	github.com/chromedp/cdproto v0.0.0-20260714215040-dc233986426f // indirect
 	github.com/chromedp/chromedp v0.16.0 // indirect
