@@ -423,21 +423,38 @@ http:
         status: [200]
 ```
 
-已支持：`id`/`info`、`variables`、`http`（也接受 `requests` 写法）、`path` 与 `raw` 两种请求形式、
-`headers`、`body`、`payloads` 与 `{{name}}` 替换、extractor（regex / kval / json / dsl）并把结果传给后续请求，
+已支持：`id`/`info`、`variables`（按书写顺序求值，后面的可以引用前面的）、`http`（也接受
+`requests` 写法）、`path` 与 `raw` 两种请求形式、`headers`、`body`、`redirects`、
+`max-redirects`、`host-redirects`、`protocol-redirects`、`cookie-reuse` 与 `disable-cookie`、
+`payloads`（内联列表、多行值，以及按路径引用的字典文件——相对模板所在目录解析）与 `{{name}}`
+替换、`attack` 三种类型（`batteringram` 默认、`pitchfork`、`clusterbomb`）、`req-condition`
+与 `iterate-all`、extractor（`regex` / `kval` / `json` / `dsl`）并把结果传给后续请求，
 以及 `word`、`regex`、`status`、`size`、`binary`、`dsl` 六种 matcher，含 `condition`、
-`matchers-condition`、`negative`、`case-insensitive`。
+`matchers-condition`、`negative`、`internal`、`match-all`、`case-insensitive`（与 nuclei
+一致，仅 word matcher 可用）与 `encoding: hex`。
+
+引擎内部是**照着参考实现做**，而不只是长得像：三种 attack 类型发出的请求与 nuclei 一致；
+`case-insensitive` 只在 nuclei 允许的地方被接受；响应 part 的取名与查表方式与 nuclei 相同；
+同一模板的多个请求之间默认复用 cookie（除非该块显式关闭）；表达式引用了响应里没有的变量时
+判为不匹配，而不是"任何字符串都包含空串"式地全判命中。
+
+`json` extractor 支持公开模板常用的 jq 形态 —— `.field`、`.a.b[0]`、`.items[]`，以及备选写法
+`.a // .b`；其余 jq 语法会被拒绝而不是猜着跑。
 
 `dsl` 求值器支持比较运算、`&&`/`||`/`!`，以及常用函数 ——
 `contains`、`contains_all`、`contains_any`、`starts_with`、`ends_with`、`len`、`tolower`、
 `toupper`、`trim`、`replace`、`concat`、`substr`、`reverse`、`regex`、`md5`、`sha1`、
 `sha256`、`base64`、`base64_decode`、`url_encode`、`url_decode`、`hex_encode`、
-`hex_decode`、`rand_int`、`randstr`、`unix_time` —— 可作用于 `body`、`all_headers`、`raw`、
-`status_code`、`content_length`、`duration` 以及任意响应头。
+`hex_decode`、`rand_int`、`randstr`、`unix_time` —— 可作用于 `body`、`all_headers`、
+`header`、`request`、`response`、`status_code`、`content_length`、`duration`、响应携带的
+cookie 以及任意响应头。
 
-使用了 crackweb 无法执行的功能的模板（`flow`、`raw unsafe` 请求、pipelining、xpath matcher、
-非 batteringram 的 attack 类型）会被**跳过并给出警告**，绝不会半途执行。可以从
-`examples/templates/` 开始。
+使用了 crackweb 无法执行的功能的模板（`flow`、self-contained 模板、`raw unsafe` 请求、
+pipelining、`race`、`fuzzing` 规则、global matcher、xpath 与 LLM 算子、上列形态之外的 jq）
+会被**跳过并给出警告**，绝不会半途执行；nuclei 自己也会拒绝编译的模板（matcher 缺取值、
+空 operator 块、在非 word matcher 上用 `case-insensitive`）同样如此。某个块描述的 payload
+组合超过 64 组时，会只跑前 64 组**并把这件事说出来**，不让一次扫描悄悄只覆盖模板的一部分。
+可以从 `examples/templates/` 开始。
 
 ## 报告
 

@@ -149,8 +149,15 @@ func (c *Context) Do(ctx context.Context, req *httpmsg.Request) (*httpmsg.Respon
 	return c.do(ctx, req, false)
 }
 
-// do sends a request, optionally with the configured credentials left off.
-func (c *Context) do(ctx context.Context, req *httpmsg.Request, anonymous bool) (*httpmsg.Response, error) {
+// Observe records a request a check sent through its own HTTP client, so the
+// scan's request total and its per-request reporting cover every request the
+// scan made.
+//
+// A template builds its own requests — with redirect and cookie behaviour of its
+// own — and cannot send them through Do, so without this its traffic is
+// invisible: the report says what a scan cost in requests, and template requests
+// are part of that cost.
+func (c *Context) Observe(req *httpmsg.Request) {
 	c.mu.Lock()
 	c.requests++
 	watch := c.OnRequest
@@ -162,6 +169,11 @@ func (c *Context) do(ctx context.Context, req *httpmsg.Request, anonymous bool) 
 	if watch != nil && req != nil {
 		watch(req)
 	}
+}
+
+// do sends a request, optionally with the configured credentials left off.
+func (c *Context) do(ctx context.Context, req *httpmsg.Request, anonymous bool) (*httpmsg.Response, error) {
+	c.Observe(req)
 
 	var resp *httpmsg.Response
 	var err error

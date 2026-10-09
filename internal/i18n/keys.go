@@ -603,6 +603,7 @@ const (
 	KeyMsgCAExported              Key = "msg.ca-exported"
 	KeyMsgCrawlStats              Key = "msg.crawl-stats"
 	KeyMsgTemplateUnsupported     Key = "msg.template-unsupported"
+	KeyMsgTemplateTruncated       Key = "msg.template-truncated"
 	KeyMsgNoBrowser               Key = "msg.no-browser"
 	KeyMsgSessionsLoaded          Key = "msg.sessions-loaded"
 	KeyMsgIDORNeedsSessions       Key = "msg.idor-needs-sessions"

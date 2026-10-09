@@ -469,22 +469,41 @@ http:
         status: [200]
 ```
 
-Supported: `id`/`info`, `variables`, `http` (also spelled `requests`), `path` and `raw`
-request forms, `headers`, `body`, `payloads` with `{{name}}` substitution, extractors
-(regex, kval, json, dsl) feeding later requests, and the `word`, `regex`, `status`,
-`size`, `binary` and `dsl` matcher types with `condition`, `matchers-condition`,
-`negative` and `case-insensitive`.
+Supported: `id`/`info`, `variables` (evaluated in the order they are written, so one
+may build on another), `http` (also spelled `requests`), `path` and `raw` request forms,
+`headers`, `body`, `redirects`, `max-redirects`, `host-redirects`, `protocol-redirects`,
+`cookie-reuse` and `disable-cookie`, `payloads` — inline lists, multi-line values, and
+helper files named by path, resolved next to the template — with `{{name}}` substitution,
+the `attack` types `batteringram` (the default), `pitchfork` and `clusterbomb`,
+`req-condition` and `iterate-all`, extractors (`regex`, `kval`, `json`, `dsl`) whose values
+feed later requests, and the `word`, `regex`, `status`, `size`, `binary` and `dsl` matcher
+types with `condition`, `matchers-condition`, `negative`, `internal`, `match-all`,
+`case-insensitive` (word matchers, as in nuclei) and `encoding: hex`.
+
+Internally the engine follows the reference implementation rather than resembling it: the
+three attack types send the requests nuclei would send, `case-insensitive` is accepted only
+where nuclei accepts it, a response part is looked up the way nuclei looks it up, cookies
+are reused between a template's requests unless the block says otherwise, and an expression
+over a variable the response does not have fails to match instead of matching everything.
+
+The `json` extractor evaluates the jq shapes published templates use — `.field`, `.a.b[0]`,
+`.items[]`, and alternatives (`.a // .b`) — and refuses the rest rather than guessing.
 
 The `dsl` evaluator understands comparisons, `&&`/`||`/`!`, and the usual helpers —
 `contains`, `contains_all`, `contains_any`, `starts_with`, `ends_with`, `len`, `tolower`,
 `toupper`, `trim`, `replace`, `concat`, `substr`, `reverse`, `regex`, `md5`, `sha1`,
 `sha256`, `base64`, `base64_decode`, `url_encode`, `url_decode`, `hex_encode`,
-`hex_decode`, `rand_int`, `randstr`, `unix_time` — over `body`, `all_headers`, `raw`,
-`status_code`, `content_length`, `duration` and any response header.
+`hex_decode`, `rand_int`, `randstr`, `unix_time` — over `body`, `all_headers`, `header`,
+`request`, `response`, `status_code`, `content_length`, `duration`, the response's cookies
+and any response header.
 
-Templates using features crackweb cannot honour (`flow`, `unsafe` raw requests, pipelining,
-xpath matchers, non-batteringram attack types) are **skipped with a warning**, never run
-half-way. See `examples/templates/` to start.
+Templates using features crackweb cannot honour (`flow`, self-contained templates, `unsafe`
+raw requests, pipelining, `race`, `fuzzing` rules, global matchers, xpath and LLM operators,
+jq beyond the shapes above) are **skipped with a warning**, never run half-way. So are
+templates nuclei itself refuses to compile, such as a matcher without its values, an empty
+operator block, or `case-insensitive` on something other than a word matcher. A block whose
+payloads describe more than 64 requests is scanned over the first 64 and says so, rather
+than covering a fraction of a template in silence. See `examples/templates/` to start.
 
 ## Reports
 

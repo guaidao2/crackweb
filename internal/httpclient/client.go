@@ -164,6 +164,83 @@ func parseProxy(raw string) (*url.URL, error) {
 	return u, nil
 }
 
+// RedirectPolicy describes how a client treats 3xx responses.
+//
+// A nuclei template names its own redirect behaviour per request ("redirects",
+// "host-redirects", "protocol-redirects", "max-redirects"), so it cannot live on
+// the scan's client: one check wants the Location header a redirect carries and
+// the next wants the page behind it.
+type RedirectPolicy struct {
+	// Follow enables following redirects at all. With it off the 3xx response
+	// is the response, which is what a template matching on a 302 needs.
+	Follow bool
+	// SameHost follows only redirects that stay on the original host.
+	SameHost bool
+	// SameScheme follows only redirects that keep the scheme, so a target that
+	// answers an http:// request with an https:// location is not followed.
+	SameScheme bool
+	// Max bounds the chain; zero means the client's own limit.
+	Max int
+}
+
+// Derived returns a client that shares this client's transport, rate limiter and
+// credentials, with its own redirect policy and — when asked for — its own
+// cookie jar.
+//
+// Sharing the transport is the point: the derived client queues behind the same
+// rate limiter and carries the same identity, so a template's requests are
+// counted and authenticated like every other request the scan makes. What
+// changes is only where a response is allowed to come from.
+func (c *Client) Derived(policy RedirectPolicy, jar http.CookieJar, useJar bool) *Client {
+	if c == nil {
+		return nil
+	}
+
+	max := policy.Max
+	if max <= 0 {
+		max = c.opts.MaxRedirects
+	}
+	if max <= 0 {
+		max = 10
+	}
+
+	// http.Client.Timeout stays 0 for the same reason it does on the scan's
+	// client: the deadline belongs to the request.
+	derived := &Client{opts: c.opts, limiter: c.limiter, noGzip: c.noGzip}
+	httpClient := &http.Client{
+		Transport:     c.hg.Transport,
+		Timeout:       0,
+		CheckRedirect: redirectHook(policy, max),
+	}
+	if useJar && jar != nil {
+		httpClient.Jar = jar
+	}
+	derived.hg = httpClient
+	return derived
+}
+
+// redirectHook turns a policy into net/http's redirect decision.
+func redirectHook(policy RedirectPolicy, max int) func(req *http.Request, via []*http.Request) error {
+	return func(req *http.Request, via []*http.Request) error {
+		if !policy.Follow {
+			return http.ErrUseLastResponse
+		}
+		if len(via) >= max {
+			return fmt.Errorf("stopped after %d redirects", max)
+		}
+		if len(via) == 0 {
+			return nil
+		}
+		if policy.SameHost && req.URL.Hostname() != via[0].URL.Hostname() {
+			return http.ErrUseLastResponse
+		}
+		if policy.SameScheme && req.URL.Scheme != via[0].URL.Scheme {
+			return http.ErrUseLastResponse
+		}
+		return nil
+	}
+}
+
 // Do sends a request and returns the response. A transport-level failure is
 // returned as an error; an HTTP error status is a perfectly good response and
 // comes back as one.

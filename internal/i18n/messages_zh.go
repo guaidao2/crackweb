@@ -576,6 +576,7 @@ var chinese = map[Key]string{
 	KeyMsgCAExported:              "CA 证书已导出到 %s",
 	KeyMsgCrawlStats:              "爬取：抓取 %d 个页面，发现 %d 个 URL，扫描 %d 个请求",
 	KeyMsgTemplateUnsupported:     "模板 %s 使用了 crackweb 无法执行的功能，已跳过：%s",
+	KeyMsgTemplateTruncated:       "模板 %s 的第 %d 个请求描述了 %d 组 payload 组合，只会发送前 %d 组",
 	KeyMsgNoBrowser:               "未找到基于 Chromium 的浏览器，headless 爬虫不可用，将退回 HTTP 引擎。请安装 Chrome、Chromium 或 Edge，或用 CRACKWEB_CHROME 指定浏览器路径，也可显式使用 --engine http 以不再提示。",
 
 	KeyErrBadSensitivity:      "灵敏度必须在 1 到 5 之间",

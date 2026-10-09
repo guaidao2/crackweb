@@ -143,13 +143,46 @@ func TestBuiltinVariables(t *testing.T) {
 }
 
 func TestBuiltinVariablesDefaultPorts(t *testing.T) {
+	// The port a target did not write is not invented into Hostname: nuclei
+	// keeps the host as given and fills Port from the scheme, and a template
+	// that joins {{Hostname}} into a URL would otherwise reach a host the scan
+	// was never pointed at.
 	req, _ := httpmsg.NewRequest("GET", "https://example.com/")
 	vars := BuiltinVariables(req.URL)
-	if got := vars["Hostname"].String(); got != "example.com:443" {
-		t.Errorf("Hostname = %q, want example.com:443", got)
+	if got := vars["Hostname"].String(); got != "example.com" {
+		t.Errorf("Hostname = %q, want example.com", got)
+	}
+	if got := vars["RootURL"].String(); got != "https://example.com" {
+		t.Errorf("RootURL = %q, want https://example.com", got)
 	}
 	if got := vars["Port"].String(); got != "443" {
 		t.Errorf("Port = %q, want 443", got)
+	}
+	if got := vars["Query"].String(); got != "" {
+		t.Errorf("Query = %q, want empty", got)
+	}
+}
+
+func TestBuiltinVariablesPathQueryAndInput(t *testing.T) {
+	req, err := httpmsg.NewRequest("GET", "https://example.com/app/sub/?b=2&a=1")
+	if err != nil {
+		t.Fatalf("NewRequest: %v", err)
+	}
+	vars := BuiltinVariables(req.URL)
+
+	cases := map[string]string{
+		// Path is the directory and File the last segment, as nuclei splits
+		// them with path.Dir and path.Base — a path ending in a slash has no
+		// empty file segment, it has the segment before it.
+		"Path":  "/app/sub",
+		"File":  "sub",
+		"Query": "?a=1&b=2",
+		"Input": "https://example.com/app/sub/?b=2&a=1",
+	}
+	for name, want := range cases {
+		if got := vars[name].String(); got != want {
+			t.Errorf("%s = %q, want %q", name, got, want)
+		}
 	}
 }
 
@@ -232,15 +265,20 @@ func TestDSLErrorsAreReported(t *testing.T) {
 	}
 }
 
-func TestUnknownVariableIsEmptyNotFatal(t *testing.T) {
-	// A template may reference a variable crackweb does not supply; that must
-	// not abort the check.
-	value, err := Eval("len(missing_variable) == 0", map[string]Value{})
-	if err != nil {
-		t.Fatalf("Eval: %v", err)
+func TestUnknownVariableIsAnError(t *testing.T) {
+	// A template may reference a variable crackweb does not supply. nuclei's
+	// evaluator reports that as an error, and a matcher that cannot be
+	// evaluated does not match — the opposite would make
+	// `contains(body, missing)` true for every response, because every string
+	// contains the empty string.
+	if _, err := Eval("len(missing_variable) == 0", map[string]Value{}); err == nil {
+		t.Error("an unknown variable was accepted")
 	}
-	if !value.Truthy() {
-		t.Error("unknown variable did not evaluate to empty")
+
+	matched, evidence := matchDSL(Matcher{Type: "dsl", DSL: StringList{"contains(body, missing)"}},
+		map[string]Value{"body": StringValue("anything at all")})
+	if matched || len(evidence) != 0 {
+		t.Error("a matcher over an unknown variable reported a match")
 	}
 }
 
@@ -272,7 +310,7 @@ func TestRunsTemplateAgainstATarget(t *testing.T) {
 		t.Fatalf("NewRequest: %v", err)
 	}
 
-	findings := runner.Execute(context.Background(), tmpl, target, nil)
+	findings := runner.Execute(context.Background(), tmpl, target, nil, nil)
 	if len(findings) != 1 {
 		t.Fatalf("got %d findings, want 1", len(findings))
 	}
@@ -306,7 +344,7 @@ func TestTemplateThatShouldNotMatch(t *testing.T) {
 	runner := NewRunner(client)
 	target, _ := httpmsg.NewRequest("GET", server.URL+"/")
 
-	if findings := runner.Execute(context.Background(), tmpl, target, nil); len(findings) != 0 {
+	if findings := runner.Execute(context.Background(), tmpl, target, nil, nil); len(findings) != 0 {
 		t.Errorf("matched a page that should not match: %d finding(s)", len(findings))
 	}
 }
@@ -345,7 +383,7 @@ http:
 	runner := NewRunner(client)
 	target, _ := httpmsg.NewRequest("GET", server.URL+"/")
 
-	runner.Execute(context.Background(), tmpl, target, nil)
+	runner.Execute(context.Background(), tmpl, target, nil, nil)
 
 	joined := strings.Join(requested, ",")
 	if !strings.Contains(joined, "admin") || !strings.Contains(joined, "login") {

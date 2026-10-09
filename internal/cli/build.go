@@ -282,12 +282,15 @@ func selectedChecks(app *App, spec string, templateDirs []string, client *httpcl
 	candidates := checks.All()
 	if len(templateDirs) > 0 {
 		runner := template.NewRunner(client)
-		loaded, unsupported, errs := template.LoadChecks(runner, templateDirs)
+		loaded, unsupported, truncated, errs := template.LoadChecks(runner, templateDirs)
 		for _, err := range errs {
 			app.Warn(i18n.KeyMsgRequestError, err)
 		}
 		for id, reasons := range unsupported {
 			app.Warn(i18n.KeyMsgTemplateUnsupported, id, strings.Join(reasons, ", "))
+		}
+		for _, note := range truncated {
+			app.Warn(i18n.KeyMsgTemplateTruncated, note.TemplateID, note.Request, note.Described, note.Sent)
 		}
 		for _, check := range loaded {
 			candidates = append(candidates, check)

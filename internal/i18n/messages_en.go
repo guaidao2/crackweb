@@ -676,6 +676,7 @@ var english = map[Key]string{
 	KeyMsgCAExported:              "CA certificate exported to %s",
 	KeyMsgCrawlStats:              "crawl: %d page(s) fetched, %d URL(s) discovered, %d request(s) scanned",
 	KeyMsgTemplateUnsupported:     "template %s uses features crackweb cannot run and was skipped: %s",
+	KeyMsgTemplateTruncated:       "template %s request %d describes %d payload combinations; only the first %d will be sent",
 	KeyMsgNoBrowser:               "no Chromium-based browser found, so the headless crawler is unavailable; continuing with the HTTP engine. Install Chrome, Chromium or Edge, point CRACKWEB_CHROME at a browser binary, or choose --engine http to silence this.",
 
 	KeyErrBadSensitivity: "sensitivity must be between 1 and 5",

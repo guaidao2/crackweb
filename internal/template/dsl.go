@@ -370,20 +370,24 @@ func (p *dslParser) parseCall(name string) (Value, error) {
 }
 
 // lookup resolves an identifier to a variable.
+//
+// An unknown name is an error, which is what nuclei's evaluator reports ("no
+// parameter 'x' found") and what its matchers treat as a failure to match.
+// Answering with an empty string instead is not the harmless option it looks
+// like: every string contains the empty string, so `contains(body, token)`
+// becomes true for every response the moment `token` is a name this engine does
+// not know, and the template reports a hit on a clean target.
 func (p *dslParser) lookup(name string) (Value, error) {
-	if value, ok := p.vars[name]; ok {
-		return value, nil
-	}
-	// An unknown identifier is not fatal: a template referring to a variable
-	// crackweb does not provide should evaluate to empty rather than abort the
-	// whole check.
 	switch strings.ToLower(name) {
 	case "true":
 		return BoolValue(true), nil
 	case "false":
 		return BoolValue(false), nil
 	}
-	return StringValue(""), nil
+	if value, ok := p.vars[name]; ok {
+		return value, nil
+	}
+	return Value{}, evalErrorf("no parameter %q", name)
 }
 
 // compare applies a comparison operator, choosing numeric or string semantics
