@@ -280,12 +280,16 @@ func TestEchoRestoreIsAppliedToBothSides(t *testing.T) {
 	}
 }
 
-// TestSQLiOrderByCostsAnUnrelatedParameterTwoRequests: asking every parameter is
-// what keeps the coverage honest, so the cost has to be bounded by the order the
-// questions are asked in. A value that never reaches a query accepts both the
-// in-range and the out-of-range term, and the second answer ends the check before
-// the confirming pair is spent.
-func TestSQLiOrderByCostsAnUnrelatedParameterTwoRequests(t *testing.T) {
+// TestSQLiOrderByCostsAnUnrelatedParameterABoundedNumberOfRequests: asking every
+// parameter is what keeps the coverage honest, so the cost has to stay bounded by
+// the order the questions are asked in. A value that never reaches a query
+// accepts both the in-range and the out-of-range term, which ends the first pass
+// in two requests; each fallback seed then costs three — its own baseline, an
+// in-range term the application accepts, and the out-of-range term that ends the
+// pass — so the bound is what the check spends on a position that is not a sort
+// list at all, and it is spent to be able to tell that from a sort list the seed
+// could not address.
+func TestSQLiOrderByCostsAnUnrelatedParameterABoundedNumberOfRequests(t *testing.T) {
 	var requests int64
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		atomic.AddInt64(&requests, 1)
@@ -314,29 +318,91 @@ func TestSQLiOrderByCostsAnUnrelatedParameterTwoRequests(t *testing.T) {
 	if len(findings) != 0 {
 		t.Fatalf("an unrelated parameter was reported: %v", findings[0].Evidence.Matches)
 	}
-	if spent != 2 {
-		t.Errorf("the check spent %d request(s) on a value that is not a sort term, want 2", spent)
+	want := int64(2 + 3*len(orderBySeeds))
+	if spent != want {
+		t.Errorf("the check spent %d request(s) on a value that is not a sort term, want %d", spent, want)
 	}
 }
 
-// TestSQLiOrderByNeedsAValueToAppendTo: `ORDER BY ,1` is not a sort term, so a
-// parameter with nothing in it has no position to test.
-func TestSQLiOrderByNeedsAValueToAppendTo(t *testing.T) {
+// TestSQLiOrderByIgnoresAWhitelistedSortLeftEmpty: the fallback seeds are asked
+// of the same position as the caller's value, so an endpoint that maps its value
+// onto allowed column names must stay unreported when the form left the field
+// empty — the substitution widens which parameters reach the question, not which
+// answers count as a finding.
+func TestSQLiOrderByIgnoresAWhitelistedSortLeftEmpty(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		switch firstQueryValue(r) {
+		case "id desc", "id asc", "name desc", "name asc":
+			fmt.Fprint(w, orderPage(orderSiteColumnCount))
+		default:
+			fmt.Fprint(w, orderPage(0))
+		}
+	}))
+	defer server.Close()
+
+	h := newHarness(t)
+	if findings := withParameter(t, h, sqliOrderBy{}, server.URL+"/users?sort="); len(findings) != 0 {
+		t.Errorf("a whitelisted sort parameter with an empty value was reported: %v", findings[0].Evidence.Matches)
+	}
+}
+
+// TestSQLiOrderByIgnoresAnEmptyValueTheApplicationNeverUses: the fallback seeds
+// go to a parameter nothing reads, and an unused value accepts every term, so the
+// position cannot be observed and nothing is reported.
+func TestSQLiOrderByIgnoresAnEmptyValueTheApplicationNeverUses(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		fmt.Fprint(w, orderPage(orderSiteColumnCount))
+	}))
+	defer server.Close()
+
+	h := newHarness(t)
+	if findings := withParameter(t, h, sqliOrderBy{}, server.URL+"/users?q="); len(findings) != 0 {
+		t.Errorf("an empty parameter the application ignores was reported: %v", findings[0].Evidence.Matches)
+	}
+}
+
+// TestSQLiOrderByFiresOnAFormFieldLeftEmpty is the case a full-site scan meets
+// every time: a crawl enumerates a form field the visitor did not fill in, so
+// the parameter arrives empty and there is nothing to append a term to.
+//
+// Declining there is what let an injectable sort parameter go unreported for a
+// whole scan — the form is where the parameter came from, so the empty value is
+// the rule rather than an edge case. The position is a sort list whether or not
+// the seed was usable, so the check asks it with a sort term of its own.
+func TestSQLiOrderByFiresOnAFormFieldLeftEmpty(t *testing.T) {
 	server := orderBySite(t)
 	h := newHarness(t)
 
-	request, err := httpmsg.NewRequest("GET", server.URL+"/users?order=")
-	if err != nil {
-		t.Fatalf("NewRequest: %v", err)
+	findings := withParameter(t, h, sqliOrderBy{}, server.URL+"/users?order=")
+	if len(findings) == 0 {
+		t.Fatal("a sort parameter a form left empty was not reported")
 	}
-	baseline, err := h.client.Do(context.Background(), request)
-	if err != nil {
-		t.Fatalf("baseline: %v", err)
+	// The caller sent nothing, so the value that produced the evidence is the
+	// term the check asked with — and the report has to quote that one, because
+	// it is the one a reader can replay.
+	if want := "id" + outOfRangeTerms[0]; findings[0].Payload != want {
+		t.Errorf("payload = %q, want %q", findings[0].Payload, want)
 	}
-	params := request.Params()
-	target := &checks.Target{Request: request, Response: baseline, Param: &params[0]}
+	if !strings.Contains(string(findings[0].Evidence.Request), url.QueryEscape(findings[0].Payload)) {
+		t.Errorf("the evidence request does not carry the payload %q:\n%s", findings[0].Payload, findings[0].Evidence.Request)
+	}
+	if f := findings[0]; len(f.Evidence.Response) == 0 || len(f.Evidence.Baseline) == 0 || f.Evidence.Diff == "" {
+		t.Error("evidence is incomplete")
+	}
+}
 
-	if findings := (sqliOrderBy{}).Run(context.Background(), h.ctx, target); len(findings) != 0 {
-		t.Errorf("an empty sort value was reported: %v", findings[0].Evidence.Matches)
+// TestSQLiOrderByFiresWhenTheValueIsNotASortTerm: a value the query cannot sort
+// by (`abc` against a result set with no such column) fails the statement before
+// any term is appended, so the first pass compares one failure page against
+// another and learns nothing — the same blind spot as the empty value, reached a
+// different way.
+func TestSQLiOrderByFiresWhenTheValueIsNotASortTerm(t *testing.T) {
+	server := orderBySite(t)
+	h := newHarness(t)
+
+	if findings := withParameter(t, h, sqliOrderBy{}, server.URL+"/users?order=abc"); len(findings) == 0 {
+		t.Error("a sort parameter holding a value the query cannot sort by was not reported")
 	}
 }

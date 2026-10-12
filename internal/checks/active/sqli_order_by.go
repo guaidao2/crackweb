@@ -70,6 +70,26 @@ var inRangeTerms = []string{",1", ",2"}
 // refusal as a verdict.
 var outOfRangeTerms = []string{",99", ",999"}
 
+// orderBySeeds are sort terms of the check's own, used when the value the
+// application was given cannot be the base of one.
+//
+// Every term the method appends goes onto a value that is already a term, so an
+// empty parameter has nothing to append to — and an empty parameter is exactly
+// what a form elicits: a crawl enumerates a field the visitor did not fill in,
+// and the scan asks about `order=` rather than `order=1`. Refusing to test there
+// is not a narrower version of this check but a blind one, and the blindness is
+// systematic rather than occasional: the position is either a sort list or it is
+// not, and asking it with a term of our own answers the same question about the
+// same parameter. A value the query cannot sort by (`order=abc` against a result
+// set with no such column) is blind in the same way, because appending to it
+// compares one failure page against another.
+//
+// "1" is a column position, which every engine accepts in a sort list, and "id"
+// is the column sorting endpoints most often sort by. Both are payloads rather
+// than assumptions: a seed the query cannot sort by is refused by the target's
+// own answer, which decides nothing and costs a request.
+var orderBySeeds = []string{"1", "id"}
+
 func (sqliOrderBy) Run(ctx context.Context, c *checks.Context, t *checks.Target) []*finding.Finding {
 	if t == nil || t.Param == nil || t.Response == nil {
 		return nil
@@ -80,20 +100,52 @@ func (sqliOrderBy) Run(ctx context.Context, c *checks.Context, t *checks.Target)
 	if t.Param.In == httpmsg.LocCookie && isSessionCookie(t.Param.Name) {
 		return nil
 	}
-	// Every term below is appended to the value the caller already supplied, so a
-	// parameter with nothing in it gives nothing to append to: `ORDER BY ,1` is
-	// not a sort term, and an endpoint that takes no value at all has no position
-	// this method can address. That is a limit of the technique, not a judgement
-	// about which parameters are worth testing.
-	if strings.TrimSpace(t.Param.Value) == "" {
-		return nil
+	c.ProbeWAF(ctx, t)
+
+	// The value the application was given first, so that a finding on a value
+	// that is a sort term quotes the value the caller actually sent.
+	if strings.TrimSpace(t.Param.Value) != "" {
+		if f := probeSortList(ctx, c, t, t.Param.Value, t.Response); f != nil {
+			return []*finding.Finding{f}
+		}
 	}
 
-	base := c.BaselineFingerprint(t)
+	// Then a sort term of our own. This is where a parameter with no usable value
+	// is answered — the empty one a form produced, or one whose value the query
+	// cannot sort by — and it is also what settles a sort parameter the first
+	// pass could not, because the two passes ask the same position the same
+	// question and only the seed differs.
+	for _, seed := range orderBySeeds {
+		if seed == t.Param.Value {
+			continue
+		}
+		seedRequest, seedResponse, err := c.InjectEncoded(ctx, t, seed, checks.EncodeURL)
+		if err != nil || seedRequest == nil || seedResponse == nil {
+			continue
+		}
+		if c.WAF.IsBlocked(seedRequest.Hostname(), seedResponse) {
+			continue
+		}
+		if f := probeSortList(ctx, c, t, seed, seedResponse); f != nil {
+			return []*finding.Finding{f}
+		}
+	}
+	return nil
+}
+
+// probeSortList asks whether the position a parameter occupies is a sorting
+// clause, building every term from seed and comparing each answer against
+// seedResponse — the response the same parameter produced with seed alone.
+//
+// It returns the finding the answers justify, or nil.
+func probeSortList(ctx context.Context, c *checks.Context, t *checks.Target, seed string, seedResponse *httpmsg.Response) *finding.Finding {
+	if seedResponse == nil {
+		return nil
+	}
+	base := c.Fingerprint(seedResponse)
 	if base == nil || base.NormLen == 0 {
 		return nil
 	}
-	c.ProbeWAF(ctx, t)
 
 	// baseUnder returns the baseline fingerprinted the way a probe is: a page
 	// that echoes the parameter value has to be compared against the value it
@@ -103,11 +155,11 @@ func (sqliOrderBy) Run(ctx context.Context, c *checks.Context, t *checks.Target)
 	// `size="1"`) then shortens both fingerprints equally, where applying it to
 	// one side only manufactures a difference that is not there.
 	baseUnder := func(value string) *diff.Fingerprint {
-		return c.Fingerprint(t.Response, echoRestore(value, t.Param.Value)...)
+		return c.Fingerprint(seedResponse, echoRestore(value, seed)...)
 	}
 
 	probe := func(suffix string) (string, *httpmsg.Request, *httpmsg.Response, *diff.Fingerprint, bool) {
-		value := t.Param.Value + suffix
+		value := seed + suffix
 		request, response, err := c.InjectEncoded(ctx, t, value, checks.EncodeURL)
 		if err != nil || request == nil || response == nil {
 			return "", nil, nil, nil, false
@@ -119,7 +171,7 @@ func (sqliOrderBy) Run(ctx context.Context, c *checks.Context, t *checks.Target)
 		if c.WAF.IsBlocked(request.Hostname(), response) {
 			return "", nil, nil, nil, false
 		}
-		return value, request, response, c.Fingerprint(response, echoRestore(value, t.Param.Value)...), true
+		return value, request, response, c.Fingerprint(response, echoRestore(value, seed)...), true
 	}
 
 	// accepted reports whether a term was taken and the page is the page. The
@@ -127,7 +179,7 @@ func (sqliOrderBy) Run(ctx context.Context, c *checks.Context, t *checks.Target)
 	// is a term it refused, whatever the body says.
 	accepted := func(suffix string) bool {
 		value, _, response, fp, ok := probe(suffix)
-		if !ok || response.Status != t.Response.Status {
+		if !ok || response.Status != seedResponse.Status {
 			return false
 		}
 		return fp.NormHash == baseUnder(value).NormHash
@@ -159,7 +211,7 @@ func (sqliOrderBy) Run(ctx context.Context, c *checks.Context, t *checks.Target)
 	if !ok {
 		return nil
 	}
-	pastEndValue := t.Param.Value + outOfRangeTerms[0]
+	pastEndValue := seed + outOfRangeTerms[0]
 
 	// The second in-range term is what tells the two shapes of a sorting clause
 	// apart, and neither answer contradicts the position. A result set of two
@@ -184,7 +236,7 @@ func (sqliOrderBy) Run(ctx context.Context, c *checks.Context, t *checks.Target)
 			return nil
 		}
 		pastEndRequest, pastEndResponse, pastEndFP = boundaryRequest, boundaryResponse, boundaryFP
-		pastEndValue = t.Param.Value + inRangeTerms[1]
+		pastEndValue = seed + inRangeTerms[1]
 	}
 
 	f := checks.NewFinding(sqliOrderBy{}, t,
@@ -201,14 +253,14 @@ func (sqliOrderBy) Run(ctx context.Context, c *checks.Context, t *checks.Target)
 	f.References = sqlReferences
 	f.Evidence.Request = pastEndRequest.Raw()
 	f.Evidence.Response = truncate(pastEndResponse.Body, 8192)
-	f.Evidence.Baseline = truncate(t.Response.Body, 4096)
+	f.Evidence.Baseline = truncate(seedResponse.Body, 4096)
 	f.Evidence.Matches = []string{
 		fmt.Sprintf("a term in range (%q) was accepted: the page did not change", inRangeTerms[0]),
 		fmt.Sprintf("a column position past the end of the result set (%q) was refused: the "+
 			"sorting clause is built from the value", pastEndValue),
 	}
 	f.Evidence.Diff = renderLineDiff(baseUnder(pastEndValue).NormText, pastEndFP.NormText, 20)
-	return []*finding.Finding{f}
+	return f
 }
 
 // renderLineDiff renders what a probe rendered that the baseline did not, which
