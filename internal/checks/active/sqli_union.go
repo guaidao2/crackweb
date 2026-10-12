@@ -242,10 +242,49 @@ func stripPayloadEcho(body, sent string) string {
 	out := body
 	for _, form := range forms {
 		if form != "" {
-			out = strings.ReplaceAll(out, form, "")
+			out = stripFold(out, form)
 		}
 	}
 	return out
+}
+
+// stripFold removes every occurrence of needle, whatever case it came back in.
+//
+// A reflection is the same reflection in any case, and the pages that change it
+// are the ordinary ones: a search endpoint folds the term it echoes, and a
+// suggestion API answers with the query it was given in lower case. Removing only
+// the spelling that was sent leaves the folded copy of the payload in the
+// response, and the evidence a caller then looks for — a field name the payload
+// itself spells, `computeMetadata` inside a metadata address — is found in text
+// the request carried rather than text the target produced.
+func stripFold(body, needle string) string {
+	if needle == "" {
+		return body
+	}
+	folded := strings.ToLower(needle)
+	lowered := strings.ToLower(body)
+	if len(lowered) != len(body) {
+		// Some non-ASCII letters change byte length when folded, and then an
+		// offset into the folded copy is not an offset into the body. That is not
+		// a shape a reflected payload has, so fall back to the exact spelling
+		// rather than guess at an offset.
+		return strings.ReplaceAll(body, needle, "")
+	}
+
+	var out strings.Builder
+	out.Grow(len(body))
+	at := 0
+	for {
+		next := strings.Index(lowered[at:], folded)
+		if next < 0 {
+			break
+		}
+		next += at
+		out.WriteString(body[at:next])
+		at = next + len(folded)
+	}
+	out.WriteString(body[at:])
+	return out.String()
 }
 
 // sqliUnion detects SQL injection by extending the query's result set.

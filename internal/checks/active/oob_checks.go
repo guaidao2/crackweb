@@ -102,6 +102,17 @@ func ssrfMetadata(ctx context.Context, c *checks.Context, t *checks.Target) *fin
 		}
 		body := strings.ToLower(stripPayloadEcho(string(response.Body), seed))
 		for _, signature := range ssrfMetadataSignatures {
+			// A field name the address itself spells is not evidence of a fetch.
+			// `computeMetadata` is inside the Google seed, so a page that prints
+			// the address it was given — in full, or cut short, or split across
+			// markup — prints this too, and a suggestion API that echoes its query
+			// would be recorded as a cloud instance that answered. Removing the
+			// echo already covers the faithful case; this covers the rest, because
+			// what these signatures name is a field of the instance, and a field
+			// of the instance is something only a fetch can produce.
+			if strings.Contains(strings.ToLower(seed), signature) {
+				continue
+			}
 			if !strings.Contains(body, signature) || strings.Contains(baseline, signature) {
 				continue
 			}

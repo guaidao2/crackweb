@@ -80,6 +80,71 @@ func TestSSRFStaysQuietWhenThePageOnlyEchoesItsInput(t *testing.T) {
 	}
 }
 
+// TestSSRFStaysQuietWhenTheEchoFoldsCase is the shape that reported this check as
+// a false positive on an ordinary search endpoint: a suggestion API answers with the
+// query it was given, lower-cased, so `computeMetadata` — which the Google seed
+// spells and the signature list looks for — comes back as `computemetadata` inside
+// the echo of the request. A reflection is the same reflection in any case, and the
+// page never fetched anything.
+func TestSSRFStaysQuietWhenTheEchoFoldsCase(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprintf(w, `["%s",[]]`, strings.ToLower(r.URL.Query().Get("url")))
+	}))
+	defer server.Close()
+
+	h := newHarness(t)
+	if findings := withParameter(t, h, ssrf{}, server.URL+"/su?action=opensearch&url=8."); len(findings) != 0 {
+		t.Errorf("a page that echoed its input in lower case was reported: %v", findings[0].Evidence.Matches)
+	}
+}
+
+// TestSSRFStaysQuietWhenTheEchoIsCutShort: the page prints only a fragment of the
+// address, so the payload as it was sent is not in the response and removing the echo
+// cannot reach it. The fragment still contains the field name the address itself
+// spells, and that is still not evidence — only the instance's fields are, and a
+// fragment of a URL does not carry any.
+func TestSSRFStaysQuietWhenTheEchoIsCutShort(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		echo := r.URL.Query().Get("url")
+		if len(echo) > 45 {
+			echo = echo[:45]
+		}
+		fmt.Fprintf(w, "<html><body><p>you searched for %s</p></body></html>", html.EscapeString(echo))
+	}))
+	defer server.Close()
+
+	h := newHarness(t)
+	if findings := withParameter(t, h, ssrf{}, server.URL+"/search?url=http://example.com"); len(findings) != 0 {
+		t.Errorf("a page that echoed a fragment of its input was reported: %v", findings[0].Evidence.Matches)
+	}
+}
+
+// TestSSRFFiresWhenTheMetadataComesBackBesideTheEcho: a debug view of a fetcher
+// prints what it was asked for and what came back. The contents are evidence and the
+// address is not, so the finding has to survive the echo being taken out of the page.
+func TestSSRFFiresWhenTheMetadataComesBackBesideTheEcho(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		target := r.URL.Query().Get("url")
+		if strings.Contains(target, "169.254.169.254") || strings.Contains(target, "metadata.google.internal") {
+			fmt.Fprintf(w, "<pre>fetched %s:\nami-id\nami-launch-index\ninstance-id\ninstance-type\n</pre>",
+				html.EscapeString(target))
+			return
+		}
+		fmt.Fprintf(w, "<pre>fetched %s</pre>", html.EscapeString(target))
+	}))
+	defer server.Close()
+
+	h := newHarness(t)
+	findings := withParameter(t, h, ssrf{}, server.URL+"/fetch?url=http://example.com")
+	if len(findings) == 0 {
+		t.Fatal("metadata that came back beside the address it was fetched from was not reported")
+	}
+	if !strings.Contains(strings.Join(findings[0].Evidence.Matches, " "), "instance-id") &&
+		!strings.Contains(strings.Join(findings[0].Evidence.Matches, " "), "ami-id") {
+		t.Errorf("the evidence does not quote the metadata: %v", findings[0].Evidence.Matches)
+	}
+}
+
 // internalServiceSite answers the way a fetch proxy does, and only a protocol request
 // gets the service's own reply back: the payload has to speak Redis to see `+PONG`.
 func internalServiceSite(t *testing.T) *httptest.Server {
