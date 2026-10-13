@@ -550,6 +550,29 @@ than merely "the response changed".
 is tunnelled untouched, so unrelated browsing keeps working and is never modified. The
 crawler stays on the seed host unless told otherwise.
 
+**A tunnel to a plaintext port is still expected to carry TLS.** A client that sends
+`CONNECT host:port` is asking for a tunnel, and the convention every interception proxy
+follows — this one included — is that TLS comes next on it. Browsers only CONNECT for
+`https://`; for a plaintext destination the request is supposed to arrive in absolute form
+(`GET http://host/path HTTP/1.1`, what the HTTP specification asks of a client talking to a
+proxy, RFC 9112 §3.2.2), which is what Burp sends.
+
+Some tools CONNECT for plaintext destinations as well and then send the plaintext request
+inside the tunnel. Put one of those in front of crackweb — or in front of any proxy that
+makes the same assumption — and every plaintext site fails, with the reason in the log:
+
+    intercept: example.com:80
+    request failed: TLS handshake with client for example.com:80: tls: first record does not look like a TLS handshake
+
+The port on that first line is the diagnosis: the peer asked for a tunnel to a plaintext
+port and then sent a plaintext request into it. It is not something to paper over on this
+side. Sniffing the first bytes would trade the certainty that decides whether to intercept
+— the same certainty this proxy needs to intercept at all — for compatibility with one
+non-conforming peer, and it would swallow the plaintext-request-on-443 case, which is worth
+seeing. The fix belongs in whatever sent the CONNECT: Yakit's MITM behaves this way when a
+downstream proxy is configured, so in that chain put it after crackweb, or send through a
+proxy that uses absolute form.
+
 **Failures are visible.** Requests that never get a response are counted and reported, not
 silently skipped: a target refusing connections must not look like a clean scan.
 
