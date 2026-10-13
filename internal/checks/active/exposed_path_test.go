@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/guaidao2/crackweb/internal/checks"
+	"github.com/guaidao2/crackweb/internal/finding"
 	"github.com/guaidao2/crackweb/internal/httpmsg"
 )
 
@@ -52,6 +53,57 @@ func TestExposedPathFiresOnAnEnvironmentFile(t *testing.T) {
 	}
 	if findings[0].Payload != "/.env" {
 		t.Errorf("payload = %q, want the path that answered", findings[0].Payload)
+	}
+	if findings[0].Severity != finding.SeverityHigh {
+		t.Errorf("severity = %v, want %v", findings[0].Severity, finding.SeverityHigh)
+	}
+}
+
+// TestExposedPathReportsAPublishedDescriptionAsMedium: a description of the application is a
+// different kind of thing from an environment file or a private key. It is a map of what the
+// application does, and publishing it is a decision somebody made, so the report says one step
+// down — the two call for different responses.
+func TestExposedPathReportsAPublishedDescriptionAsMedium(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/swagger.json" {
+			fmt.Fprint(w, `{"swagger": "2.0", "paths": {"/orders/{id}": {}}}`)
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+		fmt.Fprint(w, "<html><body>Not Found</body></html>")
+	}))
+	defer server.Close()
+
+	h := newHarness(t)
+	findings := runRequestLevel(t, h, exposedPath{}, exposedTarget(t, server))
+	if len(findings) == 0 {
+		t.Fatal("a published API description was not reported")
+	}
+	if findings[0].Severity != finding.SeverityMedium {
+		t.Errorf("severity = %v, want %v", findings[0].Severity, finding.SeverityMedium)
+	}
+}
+
+// TestExposedPathSeveritiesCoverThePublishedDescriptions: the step down belongs to the paths that
+// publish a description and to no others. Spelling that out keeps a rewording of an entry, or a
+// new one, from moving a severity without anybody deciding to.
+func TestExposedPathSeveritiesCoverThePublishedDescriptions(t *testing.T) {
+	descriptions := map[string]bool{
+		"/swagger.json":            true,
+		"/openapi.json":            true,
+		"/v2/api-docs":             true,
+		"/swagger/v1/swagger.json": true,
+		"/swagger/v2/swagger.json": true,
+		"/v3/api-docs":             true,
+	}
+	for _, entry := range exposedPathSignatures {
+		want := finding.SeverityHigh
+		if descriptions[entry.path] {
+			want = finding.SeverityMedium
+		}
+		if got := entry.severity(); got != want {
+			t.Errorf("%s: severity = %v, want %v", entry.path, got, want)
+		}
 	}
 }
 

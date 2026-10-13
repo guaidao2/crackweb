@@ -251,7 +251,7 @@ channel that can never deliver.
 | `ip-spoof` | High |
 | `http-put` | High *(opt-in: stores a file on the target)* |
 | `cors-origin` | High |
-| `exposed-path` | High |
+| `exposed-path` | High *(published API descriptions: Medium)* |
 | `jsonp` | Low |
 | `content-type-bypass` | Medium |
 | `referer-bypass` | High |

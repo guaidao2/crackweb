@@ -230,7 +230,7 @@ crackweb 在启动时向该部署注册，并轮询取回交互记录；部署�
 | `ip-spoof` | 高危 |
 | `http-put` | 高危（需显式开启：会在目标上写入文件） |
 | `cors-origin` | 高危 |
-| `exposed-path` | 高危 |
+| `exposed-path` | 高危（公开的 API 描述：中危） |
 | `jsonp` | 低危 |
 | `content-type-bypass` | 中危 |
 | `referer-bypass` | 高危 |

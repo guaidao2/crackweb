@@ -51,6 +51,23 @@ type exposedPathEntry struct {
 	hint string
 }
 
+// exposedPathAPIDescription labels the entries that publish an API description. They are the one
+// kind in this list that is often deliberate — a description is a map of the application, and
+// publishing it is a decision somebody made — unlike the environment file or the private key
+// above. It is what the reported severity is decided on.
+const exposedPathAPIDescription = "API description"
+
+// severity is what a served file of this kind is worth reporting at. Everything in this list is
+// a file that was never meant to be served except the API descriptions, which are reported one
+// step down: the description is a map of the application rather than a secret, and the two call
+// for different responses.
+func (e exposedPathEntry) severity() finding.Severity {
+	if e.what == exposedPathAPIDescription {
+		return finding.SeverityMedium
+	}
+	return finding.SeverityHigh
+}
+
 // exposedPathHints are the strings in a response that suggest a technology, keyed by the hint
 // the entries carry. They are matched against the headers and the body, lower-cased.
 var exposedPathHints = map[string][]string{
@@ -105,16 +122,18 @@ var exposedPathSignatures = []exposedPathEntry{
 	{"/config.php.bak", "<?php", "editor backup of a script", ""},
 	{"/.htaccess", "rewriteengine", "Apache configuration file", ""},
 	{"/actuator/env", "activeprofiles", "Spring Boot environment endpoint", "spring"},
-	// API descriptions: unlinked by design, and a map of everything else the application does.
-	{"/swagger.json", "swagger", "API description", ""},
-	{"/openapi.json", "openapi", "API description", ""},
-	{"/v2/api-docs", "swagger", "API description", "spring"},
+	// API descriptions: unlinked by design, a map of everything else the application does, and —
+	// unlike everything else in this list — sometimes published on purpose, which is what the
+	// severity is decided on.
+	{"/swagger.json", "swagger", exposedPathAPIDescription, ""},
+	{"/openapi.json", "openapi", exposedPathAPIDescription, ""},
+	{"/v2/api-docs", "swagger", exposedPathAPIDescription, "spring"},
 	// The same description under the path a version segment puts it on, which is what a
 	// framework with more than one API version serves — and what a search for the bare name
 	// does not reach.
-	{"/swagger/v1/swagger.json", "swagger", "API description", ""},
-	{"/swagger/v2/swagger.json", "swagger", "API description", ""},
-	{"/v3/api-docs", "openapi", "API description", ""},
+	{"/swagger/v1/swagger.json", "swagger", exposedPathAPIDescription, ""},
+	{"/swagger/v2/swagger.json", "swagger", exposedPathAPIDescription, ""},
+	{"/v3/api-docs", "openapi", exposedPathAPIDescription, ""},
 	// Framework configuration, which carries the credentials the framework signs and connects
 	// with.
 	{"/settings.py", "secret_key", "Django settings", "django"},
@@ -185,7 +204,7 @@ func (exposedPath) Run(ctx context.Context, c *checks.Context, t *checks.Target)
 
 		f := checks.NewFinding(exposedPath{}, t,
 			i18n.KeyCheckExposedPathTitle, i18n.KeyCheckExposedPathDesc, i18n.KeyCheckExposedPathFix)
-		f.Severity = finding.SeverityHigh
+		f.Severity = entry.severity()
 		// Certain: the file answered, and its contents carry a string only that file carries.
 		f.Confidence = finding.ConfidenceCertain
 		f.Method = "GET"
