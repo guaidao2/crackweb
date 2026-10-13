@@ -303,3 +303,38 @@ func TestExposedPathAsksOncePerHost(t *testing.T) {
 		t.Errorf("/.env was asked for %d time(s) across two pages of one host, want once", envRequests)
 	}
 }
+
+// TestExposedPathReportsTheAddressItAskedFor: the finding's URL has to name the resource the
+// probe fetched. Gluing the path onto the URL of the page the check was dispatched against
+// names a different one as soon as that page's URL carries a query string or sits below the
+// root, and the report then points somewhere the scan never asked about.
+func TestExposedPathReportsTheAddressItAskedFor(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/.env" {
+			fmt.Fprint(w, "APP_KEY=base64:crackweb\nDB_PASSWORD=hunter2\n")
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+		fmt.Fprint(w, "<html><body>Not Found</body></html>")
+	}))
+	defer server.Close()
+
+	for _, page := range []string{"/echo?name=admin", "/app/page.html?q=1"} {
+		request, err := httpmsg.NewRequest("GET", server.URL+page)
+		if err != nil {
+			t.Fatalf("NewRequest: %v", err)
+		}
+		h := newHarness(t)
+		response, err := h.client.Do(context.Background(), request)
+		if err != nil {
+			t.Fatalf("page %q: fetch: %v", page, err)
+		}
+		findings := runRequestLevel(t, h, exposedPath{}, &checks.Target{Request: request, Response: response})
+		if len(findings) == 0 {
+			t.Fatalf("page %q: a served environment file was not reported", page)
+		}
+		if want := server.URL + "/.env"; findings[0].URL != want {
+			t.Errorf("page %q: URL = %q, want %q", page, findings[0].URL, want)
+		}
+	}
+}

@@ -159,7 +159,7 @@ func (exposedPath) Run(ctx context.Context, c *checks.Context, t *checks.Target)
 		if entry.hint != "" && !suggested[entry.hint] {
 			continue
 		}
-		_, response, err := requestPath(ctx, c, t, entry.path, "", "")
+		probe, response, err := requestPath(ctx, c, t, entry.path, "", "")
 		if err != nil || response == nil || response.Status != 200 {
 			continue
 		}
@@ -189,7 +189,12 @@ func (exposedPath) Run(ctx context.Context, c *checks.Context, t *checks.Target)
 		// Certain: the file answered, and its contents carry a string only that file carries.
 		f.Confidence = finding.ConfidenceCertain
 		f.Method = "GET"
-		f.URL = t.Request.URLString() + entry.path
+		// The address the probe went to: the target's host, the probed path, and nothing else.
+		// Gluing the path onto the target's URL instead describes a different resource as soon
+		// as that URL carries a query string ("/echo?name=x" plus "/.env" reads as
+		// "?name=x/.env") or sits below the root ("/app/page.html" plus "/.env" reads as
+		// "/app/page.html/.env", while the request went to "/.env").
+		f.URL = probe.URLString()
 		f.Payload = entry.path
 		f.DedupHostOnly = true
 		f.DedupExtra = entry.path
