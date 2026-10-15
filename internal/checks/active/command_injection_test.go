@@ -150,3 +150,80 @@ func TestCommandInjectionPathStaysQuietOnARouteThatOnlyEchoesTheSegment(t *testi
 		t.Errorf("a route that echoed the segment was reported: %v", findings[0].Evidence.Matches)
 	}
 }
+
+// newlineFilterSite answers like a target whose filter rejects the separators it knows about
+// and the space it expects a command line to need — and then hands what is left to a shell,
+// which reads a newline as a separator all the same.
+func newlineFilterSite(t *testing.T) *httptest.Server {
+	t.Helper()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		value := r.URL.Query().Get("ip")
+		if value == "" {
+			value = r.FormValue("ip")
+		}
+		w.Header().Set("Content-Type", "text/html")
+
+		// The filter, as it is usually written: the separators it thought of, and a space.
+		if strings.ContainsAny(value, ";|& ") {
+			fmt.Fprint(w, "<html><body><pre>Filtered input detected!</pre></body></html>")
+			return
+		}
+		echoed := strings.ReplaceAll(value, "<", "&lt;")
+
+		// What survived reaches a shell. A newline separates commands there, so the last line
+		// is what runs.
+		if lines := strings.Split(value, "\n"); len(lines) > 1 {
+			last := lines[len(lines)-1]
+			if strings.Contains(last, "cat") || last == "id" {
+				fmt.Fprintf(w, "<html><body><p>PING %s</p><pre>"+
+					"root:x:0:0:root:/root:/bin/bash\n"+
+					"daemon:x:1:1:daemon:/usr/sbin:/usr/sbin/nologin</pre></body></html>", echoed)
+				return
+			}
+		}
+		fmt.Fprintf(w, "<html><body><p>PING %s</p><p>no output</p></body></html>", echoed)
+	}))
+	t.Cleanup(server.Close)
+	return server
+}
+
+// TestCommandInjectionFiresThroughANewlineSeparator: the filter knows `;`, `|` and `&`, and
+// it knows a space — the newline it does not, and the shell treats it as a separator. The
+// target runs what follows and prints the file, which is the same evidence as any other
+// printed file: nothing here is inferred from the shape of the payload.
+func TestCommandInjectionFiresThroughANewlineSeparator(t *testing.T) {
+	server := newlineFilterSite(t)
+	h := newHarness(t)
+
+	findings := withParameter(t, h, commandInjection{}, server.URL+"/ping?ip=127.0.0.1")
+	if len(findings) == 0 {
+		t.Fatal("a filter a newline goes through was not reported")
+	}
+	if !strings.Contains(strings.Join(findings[0].Evidence.Matches, " "), "root:x:0:0") {
+		t.Errorf("the evidence does not quote the file: %v", findings[0].Evidence.Matches)
+	}
+	if findings[0].Severity != finding.SeverityCritical {
+		t.Errorf("severity = %q, want critical", findings[0].Severity)
+	}
+}
+
+// TestCommandInjectionStaysQuietWhenANewlineOnlyEchoes: the same filter, nothing behind it —
+// the page prints back what it was given, newlines and all. The newline seeds must not turn a
+// target that echoes into a target that executed.
+func TestCommandInjectionStaysQuietWhenANewlineOnlyEchoes(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		value := r.URL.Query().Get("ip")
+		if value == "" {
+			value = r.FormValue("ip")
+		}
+		w.Header().Set("Content-Type", "text/html")
+		fmt.Fprintf(w, "<html><body><p>PING %s</p></body></html>",
+			strings.ReplaceAll(value, "<", "&lt;"))
+	}))
+	defer server.Close()
+
+	h := newHarness(t)
+	if findings := withParameter(t, h, commandInjection{}, server.URL+"/ping?ip=127.0.0.1"); len(findings) != 0 {
+		t.Errorf("a page that only echoed its input was reported: %v", findings[0].Evidence.Matches)
+	}
+}

