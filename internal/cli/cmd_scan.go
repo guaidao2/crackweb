@@ -83,6 +83,7 @@ func runScan(app *App, opts *scanOptions, _ []string) error {
 
 	oobProvider := buildOOBProvider(ctx, app, *opts.oobHTTP, *opts.oobDNS,
 		*opts.oobDomain, *opts.oobInteractsh, *opts.oobToken)
+	defer closeOOBProvider(oobProvider)
 
 	client, err := opts.client()
 	if err != nil {

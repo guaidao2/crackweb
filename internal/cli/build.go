@@ -446,6 +446,16 @@ func buildOOBProvider(ctx context.Context, app *App, httpAddr, dnsAddr, domain, 
 	return server
 }
 
+// closeOOBProvider gives the session back to a deployment, when the provider is one
+// that holds a session. A listener here has nothing to hand back, and a scan that ends
+// without this still works — it only leaves a registration behind on a server that is
+// not ours.
+func closeOOBProvider(provider checks.OOBProvider) {
+	if closer, ok := provider.(interface{ Close() error }); ok {
+		_ = closer.Close()
+	}
+}
+
 // newOOB builds the interaction server. The caller starts it, so that a failure
 // to bind can be reported without having half-started a scan.
 func newOOB(app *App, opts oob.Options) *oob.Server {

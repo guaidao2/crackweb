@@ -57,16 +57,20 @@ type Interactsh struct {
 	client *http.Client
 	logf   func(format string, args ...any)
 
-	private  *rsa.PrivateKey
-	corrID   string
-	secret   string
-	host     string // the deployment's host, which every callback name ends with
-	setupErr error
+	private *rsa.PrivateKey
+	corrID  string
+	secret  string
+	host    string // the deployment's host, which every callback name ends with
 
 	mu       sync.Mutex
 	tokens   map[string]bool
 	seen     map[string][]checks.Interaction
 	lastPoll time.Time
+
+	// stop ends the keep-alive routine, and closing it twice would panic, so
+	// Close guards it.
+	stop     chan struct{}
+	stopOnce sync.Once
 }
 
 // InteractshMinPollInterval is the least time between two network polls.
@@ -80,6 +84,15 @@ const InteractshMinPollInterval = 2 * time.Second
 
 // interactshTimeout bounds each exchange with the deployment.
 const interactshTimeout = 20 * time.Second
+
+// interactshKeepAliveInterval is how often the registration is renewed.
+//
+// A registration does not live as long as a scan: the deployment drops one it has
+// not heard from, and a dropped registration answers every poll with an empty set,
+// which is indistinguishable from a target that never called back. The reference
+// client renews on this interval for the same reason, and re-registering an id the
+// deployment already knows is answered as a no-op.
+const interactshKeepAliveInterval = time.Minute
 
 // The deployment's correlation id is an xid: twenty characters from this alphabet, and
 // nothing else. A registration whose id steps outside it is accepted and then never matched
@@ -132,11 +145,84 @@ func NewInteractsh(server, authToken string, logf func(format string, args ...an
 		seen:    map[string][]checks.Interaction{},
 	}
 	i.host = hostOf(base)
+	i.stop = make(chan struct{})
 
 	if err := i.register(context.Background()); err != nil {
 		return nil, err
 	}
+	// A registration does not outlive a long scan on its own, and a registration the
+	// deployment has dropped answers every poll with an empty set — the same silence
+	// as a target that never called back. The reference client renews it, so this
+	// does too.
+	go i.keepAliveLoop()
 	return i, nil
+}
+
+// keepAliveLoop renews the registration until Close is called.
+//
+// Re-registering an id the deployment already knows is a no-op. A renewal that
+// fails is worth a note and nothing more: the next poll is what reports the channel
+// being gone.
+func (i *Interactsh) keepAliveLoop() {
+	ticker := time.NewTicker(interactshKeepAliveInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ticker.C:
+			if err := i.register(context.Background()); err != nil {
+				i.logf("oob: renew the interactsh registration at %s: %v", i.server, err)
+			}
+		case <-i.stop:
+			return
+		}
+	}
+}
+
+// Close ends the session: the registration is given back to the deployment and the
+// renewals stop, so a scan leaves nothing behind on a server that is not its own.
+func (i *Interactsh) Close() error {
+	var err error
+	i.stopOnce.Do(func() {
+		close(i.stop)
+		err = i.deregister(context.Background())
+	})
+	return err
+}
+
+// deregister tells the deployment that the session is over.
+func (i *Interactsh) deregister(ctx context.Context) error {
+	body, err := json.Marshal(map[string]string{
+		"correlation-id": i.corrID,
+		"secret-key":     i.secret,
+	})
+	if err != nil {
+		return err
+	}
+
+	ctx, cancel := context.WithTimeout(ctx, interactshTimeout)
+	defer cancel()
+
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, i.server+"/deregister", bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	request.Header.Set("Content-Type", "application/json")
+	if i.token != "" {
+		request.Header.Set("Authorization", i.token)
+	}
+
+	response, err := i.client.Do(request)
+	if err != nil {
+		return fmt.Errorf("oob: deregister with interactsh at %s: %w", i.server, err)
+	}
+	defer response.Body.Close()
+
+	if response.StatusCode != http.StatusOK {
+		payload, _ := io.ReadAll(io.LimitReader(response.Body, 8192))
+		return fmt.Errorf("oob: interactsh at %s refused the deregistration: %s %s",
+			i.server, response.Status, strings.TrimSpace(string(payload)))
+	}
+	return nil
 }
 
 // normaliseInteractshServer accepts a deployment as a bare host or a full URL
@@ -340,24 +426,49 @@ func (i *Interactsh) fetch(ctx context.Context) ([]checks.Interaction, error) {
 	if err := json.Unmarshal(payload, &polled); err != nil {
 		return nil, fmt.Errorf("decode the poll response: %w", err)
 	}
-	if polled.AESKey == "" || len(polled.Data) == 0 {
-		return nil, nil
-	}
-
-	key, err := i.decryptKey(polled.AESKey)
-	if err != nil {
-		return nil, err
-	}
 
 	var out []checks.Interaction
-	for _, entry := range polled.Data {
-		record, err := decryptRecord(key, entry)
+
+	// The encrypted half: the key comes back using the public half registered at
+	// the start, and every record under data is opened with it.
+	if polled.AESKey != "" && len(polled.Data) > 0 {
+		key, err := i.decryptKey(polled.AESKey)
 		if err != nil {
-			continue
+			return nil, err
 		}
-		out = append(out, record.interaction(entry))
+		for _, entry := range polled.Data {
+			record, err := decryptRecord(key, entry)
+			if err != nil {
+				continue
+			}
+			out = append(out, record.interaction(entry))
+		}
+	}
+
+	// The halves that are not encrypted at all: extra and tlddata arrive as plain
+	// JSON, and they are not covered by the key that opens data. Reading only data
+	// is how a callback that did arrive goes unseen, which is the same failure this
+	// whole exchange had.
+	for _, entry := range polled.Extra {
+		if interaction, ok := plainInteraction(entry); ok {
+			out = append(out, interaction)
+		}
+	}
+	for _, entry := range polled.TLDData {
+		if interaction, ok := plainInteraction(entry); ok {
+			out = append(out, interaction)
+		}
 	}
 	return out, nil
+}
+
+// plainInteraction reads one of the records the deployment does not encrypt.
+func plainInteraction(entry string) (checks.Interaction, bool) {
+	var record interactshRecord
+	if err := json.Unmarshal([]byte(strings.TrimSpace(entry)), &record); err != nil {
+		return checks.Interaction{}, false
+	}
+	return record.interaction(entry), true
 }
 
 // decryptKey recovers the AES key that the poll response carries, which is
@@ -374,13 +485,12 @@ func (i *Interactsh) decryptKey(encoded string) ([]byte, error) {
 	return key, nil
 }
 
-// decryptRecord opens one entry.
+// decryptRecord opens one entry: base64, a 16-byte IV, then AES-CTR.
 //
-// The current protocol puts a 16-byte IV in front of the ciphertext and uses AES-CTR; older
-// deployments put a 12-byte nonce there and used AES-GCM. CTR leaves no authentication tag,
-// so a record that is not CTR decodes to bytes that are not JSON, which is how the two are
-// told apart without asking the deployment which it is — and why the older spelling still
-// works.
+// The IV is aes.BlockSize bytes and the cipher is CTR, which is how the reference
+// client has written records since its first commit — there is no other spelling to
+// allow for, and the plaintext is trimmed the way the reference trims it before the
+// record is read.
 func decryptRecord(key []byte, encoded string) (interactshRecord, error) {
 	raw, err := base64.StdEncoding.DecodeString(encoded)
 	if err != nil {
@@ -390,14 +500,6 @@ func decryptRecord(key []byte, encoded string) (interactshRecord, error) {
 	if err != nil {
 		return interactshRecord{}, err
 	}
-	if record, err := openCTR(block, raw); err == nil {
-		return record, nil
-	}
-	return openGCM(block, raw)
-}
-
-// openCTR reads a record the way the current protocol writes one.
-func openCTR(block cipher.Block, raw []byte) (interactshRecord, error) {
 	if len(raw) <= aes.BlockSize {
 		return interactshRecord{}, fmt.Errorf("oob: interaction record is too short")
 	}
@@ -406,37 +508,22 @@ func openCTR(block cipher.Block, raw []byte) (interactshRecord, error) {
 	cipher.NewCTR(block, iv).XORKeyStream(plain, cipherText)
 
 	var record interactshRecord
-	if err := json.Unmarshal(plain, &record); err != nil {
-		return interactshRecord{}, err
-	}
-	return record, nil
-}
-
-// openGCM reads a record the way deployments before the IV change wrote one.
-func openGCM(block cipher.Block, raw []byte) (interactshRecord, error) {
-	aead, err := cipher.NewGCM(block)
-	if err != nil {
-		return interactshRecord{}, err
-	}
-	if len(raw) < aead.NonceSize()+1 {
-		return interactshRecord{}, fmt.Errorf("oob: interaction record is too short")
-	}
-	plain, err := aead.Open(nil, raw[:aead.NonceSize()], raw[aead.NonceSize():], nil)
-	if err != nil {
-		return interactshRecord{}, err
-	}
-
-	var record interactshRecord
-	if err := json.Unmarshal(plain, &record); err != nil {
+	if err := json.Unmarshal(bytes.TrimRight(plain, " \t\r\n"), &record); err != nil {
 		return interactshRecord{}, err
 	}
 	return record, nil
 }
 
 // interactshPoll is the poll response envelope.
+//
+// Only data is encrypted: extra carries records the deployment could not put under
+// the session key, and tlddata the ones that arrived without a session at all, both
+// as plain JSON.
 type interactshPoll struct {
-	Data   []string `json:"data"`
-	AESKey string   `json:"aes_key"`
+	Data    []string `json:"data"`
+	Extra   []string `json:"extra"`
+	AESKey  string   `json:"aes_key"`
+	TLDData []string `json:"tlddata"`
 }
 
 // interactshRecord is one decrypted interaction, in the field names the

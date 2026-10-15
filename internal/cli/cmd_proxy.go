@@ -84,6 +84,7 @@ func runProxy(app *App, opts *proxyOptions, _ []string) error {
 	// reachable from the target, which is not true of a laptop behind NAT.
 	oobProvider := buildOOBProvider(ctx, app, *opts.oobHTTP, *opts.oobDNS,
 		*opts.oobDomain, *opts.oobInteractsh, *opts.oobToken)
+	defer closeOOBProvider(oobProvider)
 
 	client, err := opts.client()
 	if err != nil {

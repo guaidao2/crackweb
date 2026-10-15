@@ -1,6 +1,7 @@
 package oob
 
 import (
+	"context"
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/rand"
@@ -44,8 +45,9 @@ type fakeInteractsh struct {
 	// refuse makes /register answer the way a deployment does when it will not
 	// take the key.
 	refuse bool
-	// legacyGCM writes records the way deployments before the IV change did.
-	legacyGCM bool
+	// extra and tlddata are the two halves the deployment does not encrypt.
+	extra   []string
+	tlddata []string
 }
 
 // corrIDShape is the xid alphabet the deployment validates against.
@@ -88,19 +90,10 @@ func (f *fakeInteractsh) interact(label, protocol, rawRequest string) bool {
 	return true
 }
 
-// sealRecord writes one record the way the deployment writes it: a 16-byte IV and AES-CTR
-// now, a 12-byte nonce and AES-GCM before that change. legacyGCM picks the older spelling so
-// that a test can hold the client to reading both.
-func sealRecord(block cipher.Block, record string, legacyGCM bool) []byte {
-	if legacyGCM {
-		aead, err := cipher.NewGCM(block)
-		if err != nil {
-			return nil
-		}
-		nonce := make([]byte, aead.NonceSize())
-		_, _ = rand.Read(nonce)
-		return append(nonce, aead.Seal(nil, nonce, []byte(record), nil)...)
-	}
+// sealRecord writes one record the way the deployment writes it: a 16-byte IV and
+// AES-CTR in front of the JSON. The reference client has written and read them this
+// way since its first commit, so there is no other spelling to emulate.
+func sealRecord(block cipher.Block, record string) []byte {
 	iv := make([]byte, aes.BlockSize)
 	_, _ = rand.Read(iv)
 	sealed := make([]byte, len(record))
@@ -164,12 +157,13 @@ func (f *fakeInteractsh) handle(w http.ResponseWriter, r *http.Request) {
 			_, _ = w.Write([]byte(`{"data":null}`))
 			return
 		}
-		if len(f.records) == 0 {
+		if len(f.records) == 0 && len(f.extra) == 0 && len(f.tlddata) == 0 {
 			_, _ = w.Write([]byte(`{"data":null}`))
 			return
 		}
 		// Encrypt with a fresh AES key and hand the key back RSA-encrypted, which
-		// is the exchange the client has to undo.
+		// is the exchange the client has to undo. Only data is encrypted: extra and
+		// tlddata go out as they are.
 		key := make([]byte, 32)
 		_, _ = rand.Read(key)
 		block, err := aes.NewCipher(key)
@@ -179,7 +173,7 @@ func (f *fakeInteractsh) handle(w http.ResponseWriter, r *http.Request) {
 		}
 		var entries []string
 		for _, record := range f.records {
-			entries = append(entries, base64.StdEncoding.EncodeToString(sealRecord(block, record, f.legacyGCM)))
+			entries = append(entries, base64.StdEncoding.EncodeToString(sealRecord(block, record)))
 		}
 		wrapped, err := rsa.EncryptOAEP(sha256.New(), rand.Reader, f.key, key, nil)
 		if err != nil {
@@ -188,9 +182,14 @@ func (f *fakeInteractsh) handle(w http.ResponseWriter, r *http.Request) {
 		}
 		payload, _ := json.Marshal(map[string]any{
 			"data":    entries,
+			"extra":   f.extra,
+			"tlddata": f.tlddata,
 			"aes_key": base64.StdEncoding.EncodeToString(wrapped),
 		})
 		_, _ = w.Write(payload)
+
+	case "/deregister":
+		_, _ = w.Write([]byte(`{"message":"deregistration successful"}`))
 
 	default:
 		w.WriteHeader(http.StatusNotFound)
@@ -308,28 +307,101 @@ func TestInteractshCreditsAnInteractionToTheInjectionThatMintedIt(t *testing.T) 
 	}
 }
 
-// TestInteractshStillReadsWhatAnOlderDeploymentWrites: the record format changed with the
-// IV, and a client that reads only the current one goes quiet against a deployment that has
-// not been updated — the same silent failure this fixed, facing the other way.
-func TestInteractshStillReadsWhatAnOlderDeploymentWrites(t *testing.T) {
+// TestInteractshReadsTheRecordsItDoesNotEncrypt: only data is encrypted. The other two
+// halves of a poll response arrive as plain JSON, and ignoring them is one more way for a
+// callback that did arrive to go unseen.
+func TestInteractshReadsTheRecordsItDoesNotEncrypt(t *testing.T) {
 	f := newFakeInteractsh(t)
-	f.legacyGCM = true
 	client, err := NewInteractsh(f.server.URL, "", nil)
 	if err != nil {
 		t.Fatalf("registration failed: %v", err)
 	}
 
-	_, token := client.NewURL("ssrf")
-	if !f.interact(token, "dns", "") {
-		t.Fatal("the deployment would not credit a callback")
-	}
+	_, extraToken := client.NewURL("ssrf")
+	_, tldToken := client.NewURL("xxe")
+	f.mu.Lock()
+	f.extra = []string{`{"protocol":"http","full-id":"` + extraToken +
+		`.example","raw-request":"GET /a HTTP/1.1\r\nHost: x\r\n","remote-address":"203.0.113.8:4444"}`}
+	f.tlddata = []string{`{"protocol":"dns","full-id":"` + tldToken +
+		`.example","q-type":"A","remote-address":"203.0.113.9:5353"}`}
+	f.mu.Unlock()
 
+	// One refresh, taken by the first call; the second reads what it brought back,
+	// because the poll floor holds. A real deployment hands an interaction out once,
+	// so asking it again is not what this is about.
 	client.mu.Lock()
 	client.lastPoll = client.lastPoll.Add(-2 * InteractshMinPollInterval)
 	client.mu.Unlock()
 
-	if got := client.Poll(token); len(got) != 1 {
-		t.Fatalf("got %d interactions against an older deployment, want 1: %v", len(got), got)
+	for _, want := range []struct {
+		token string
+		half  string
+	}{{extraToken, "extra"}, {tldToken, "tlddata"}} {
+		got := client.Poll(want.token)
+		if len(got) != 1 {
+			t.Errorf("got %d interaction(s) out of %s, want 1: %v", len(got), want.half, got)
+			continue
+		}
+		if !strings.Contains(got[0].Detail, want.token) {
+			t.Errorf("detail from %s = %q, want it to name the handle %q", want.half, got[0].Detail, want.token)
+		}
+	}
+}
+
+// TestInteractshRenewsItsRegistration: a registration the deployment has dropped answers
+// every poll with an empty set, which reads exactly like a target that never called back.
+// Renewing it is what keeps a long scan's channel open, and a deployment answers a renewal
+// of an id it already knows as a no-op.
+func TestInteractshRenewsItsRegistration(t *testing.T) {
+	f := newFakeInteractsh(t)
+	client, err := NewInteractsh(f.server.URL, "", nil)
+	if err != nil {
+		t.Fatalf("registration failed: %v", err)
+	}
+
+	if err := client.register(context.Background()); err != nil {
+		t.Fatalf("renewing the registration: %v", err)
+	}
+
+	f.mu.Lock()
+	registrations := 0
+	for _, path := range f.requests {
+		if path == "/register" {
+			registrations++
+		}
+	}
+	f.mu.Unlock()
+	if registrations < 2 {
+		t.Errorf("%d registration(s) went out, want the first and a renewal", registrations)
+	}
+}
+
+// TestInteractshGivesTheRegistrationBack: the deployment is somebody else's, and a scan
+// that ends should not leave a session on it — once, however many times it is closed.
+func TestInteractshGivesTheRegistrationBack(t *testing.T) {
+	f := newFakeInteractsh(t)
+	client, err := NewInteractsh(f.server.URL, "", nil)
+	if err != nil {
+		t.Fatalf("registration failed: %v", err)
+	}
+
+	if err := client.Close(); err != nil {
+		t.Fatalf("closing the client: %v", err)
+	}
+	if err := client.Close(); err != nil {
+		t.Fatalf("closing the client twice: %v", err)
+	}
+
+	f.mu.Lock()
+	deregistrations := 0
+	for _, path := range f.requests {
+		if path == "/deregister" {
+			deregistrations++
+		}
+	}
+	f.mu.Unlock()
+	if deregistrations != 1 {
+		t.Errorf("%d deregistration(s) went out, want 1", deregistrations)
 	}
 }
 
