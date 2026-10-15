@@ -40,13 +40,17 @@ import (
 //
 //  1. Generate an RSA key pair and register its public half, along with a
 //     correlation id and a secret, at POST /register.
-//  2. Callback names are <anything>.<correlation-id>.<server>, which the
-//     deployment resolves for every name without a second registration.
-//  3. GET /poll?id=<correlation-id>&secret=<secret> returns the interactions,
-//     the records encrypted with a fresh AES key that is itself returned
-//     RSA-encrypted.
+//  2. Callback names are <correlation-id><random>.<server>: any name under it resolves
+//     without a second registration, and an interaction is credited to this registration
+//     when its label starts with the correlation id. That id is an xid — twenty characters
+//     from 0123456789abcdefghijklmnopqrstuv — and one outside that alphabet is taken at
+//     registration and then never credited, with no error anywhere to say so.
+//  3. GET /poll?id=<correlation-id>&secret=<secret> returns the interactions, the records
+//     encrypted with a fresh AES key that is itself returned RSA-encrypted and opened with
+//     the private half of the registered key.
 //
-// Nothing here is bespoke: it is the same exchange the reference client makes.
+// The exchange is the reference client's (projectdiscovery/interactsh v1.4.1, pkg/client):
+// this follows the formats it uses rather than an older version of them.
 type Interactsh struct {
 	server string
 	token  string
@@ -56,7 +60,7 @@ type Interactsh struct {
 	private  *rsa.PrivateKey
 	corrID   string
 	secret   string
-	suffix   string // <correlation-id>.<host>, the part every callback shares
+	host     string // the deployment's host, which every callback name ends with
 	setupErr error
 
 	mu       sync.Mutex
@@ -76,6 +80,24 @@ const InteractshMinPollInterval = 2 * time.Second
 
 // interactshTimeout bounds each exchange with the deployment.
 const interactshTimeout = 20 * time.Second
+
+// The deployment's correlation id is an xid: twenty characters from this alphabet, and
+// nothing else. A registration whose id steps outside it is accepted and then never matched
+// to an interaction, which is a failure with no symptom at all — the poll answers, the data
+// stays null, and the out-of-band checks quietly find nothing.
+//
+// The tail is random rather than the machine and process id that xid would encode: a
+// callback carrying this id is observable by whoever resolves it, and the reference client
+// avoids the same leak for the same reason.
+const (
+	interactshIDAlphabet    = "0123456789abcdefghijklmnopqrstuv"
+	interactshIDLength      = 20
+	interactshNonceAlphabet = "ybndrfg8ejkmcpqxot1uwisza345h769" // z-base-32, as the reference encodes the tail
+	interactshNonceLength   = 13
+	// interactshLabelLimit is what a DNS label holds; the id and the random tail are 33 of
+	// those characters, and the caller's own name takes what is left.
+	interactshLabelLimit = 63
+)
 
 // NewInteractsh registers with an interactsh deployment and returns a provider
 // that mints callback names under it.
@@ -104,12 +126,12 @@ func NewInteractsh(server, authToken string, logf func(format string, args ...an
 		client:  &http.Client{Timeout: interactshTimeout},
 		logf:    logf,
 		private: private,
-		corrID:  randomString(20),
+		corrID:  randomFrom(interactshIDAlphabet, interactshIDLength),
 		secret:  randomString(32),
 		tokens:  map[string]bool{},
 		seen:    map[string][]checks.Interaction{},
 	}
-	i.suffix = i.corrID + "." + hostOf(base)
+	i.host = hostOf(base)
 
 	if err := i.register(context.Background()); err != nil {
 		return nil, err
@@ -199,15 +221,23 @@ func (i *Interactsh) register(ctx context.Context) error {
 
 // NewURL mints a callback address and the handle that identifies it.
 //
-// The handle is the leading label of the name: when an interaction comes back,
-// the queried or requested name contains it, and that is what ties the record to
-// the injection that asked for it.
+// The name is the handle, a dot, and the deployment: `<correlation-id><random>.<server>`.
+// The correlation id has to lead it — the deployment matches an interaction to this
+// registration by that prefix, and a label that carries anything in front of the id is
+// accepted at registration and then never attributed, which is how this went unnoticed for
+// so long. Everything after the leading id is ours: the random tail is what keeps two
+// injections apart, and the caller's own name follows it for the reader.
 func (i *Interactsh) NewURL(label string) (string, string) {
-	token := "crackweb" + randomString(8)
-	if label != "" {
-		token = "crackweb" + sanitiseLabel(label) + randomString(6)
+	token := i.corrID + randomFrom(interactshNonceAlphabet, interactshNonceLength)
+	if extra := sanitiseLabel(label); extra != "" {
+		if room := interactshLabelLimit - len(token); room > 0 {
+			if len(extra) > room {
+				extra = extra[:room]
+			}
+			token += extra
+		}
 	}
-	name := token + "." + i.suffix
+	name := token + "." + i.host
 
 	i.mu.Lock()
 	i.tokens[token] = true
@@ -344,24 +374,54 @@ func (i *Interactsh) decryptKey(encoded string) ([]byte, error) {
 	return key, nil
 }
 
-// decryptRecord opens one entry: base64, a 12-byte nonce, then AES-GCM.
+// decryptRecord opens one entry.
+//
+// The current protocol puts a 16-byte IV in front of the ciphertext and uses AES-CTR; older
+// deployments put a 12-byte nonce there and used AES-GCM. CTR leaves no authentication tag,
+// so a record that is not CTR decodes to bytes that are not JSON, which is how the two are
+// told apart without asking the deployment which it is — and why the older spelling still
+// works.
 func decryptRecord(key []byte, encoded string) (interactshRecord, error) {
 	raw, err := base64.StdEncoding.DecodeString(encoded)
 	if err != nil {
 		return interactshRecord{}, err
 	}
-	if len(raw) < 13 {
-		return interactshRecord{}, fmt.Errorf("oob: interaction record is too short")
-	}
 	block, err := aes.NewCipher(key)
 	if err != nil {
 		return interactshRecord{}, err
 	}
+	if record, err := openCTR(block, raw); err == nil {
+		return record, nil
+	}
+	return openGCM(block, raw)
+}
+
+// openCTR reads a record the way the current protocol writes one.
+func openCTR(block cipher.Block, raw []byte) (interactshRecord, error) {
+	if len(raw) <= aes.BlockSize {
+		return interactshRecord{}, fmt.Errorf("oob: interaction record is too short")
+	}
+	iv, cipherText := raw[:aes.BlockSize], raw[aes.BlockSize:]
+	plain := make([]byte, len(cipherText))
+	cipher.NewCTR(block, iv).XORKeyStream(plain, cipherText)
+
+	var record interactshRecord
+	if err := json.Unmarshal(plain, &record); err != nil {
+		return interactshRecord{}, err
+	}
+	return record, nil
+}
+
+// openGCM reads a record the way deployments before the IV change wrote one.
+func openGCM(block cipher.Block, raw []byte) (interactshRecord, error) {
 	aead, err := cipher.NewGCM(block)
 	if err != nil {
 		return interactshRecord{}, err
 	}
-	plain, err := aead.Open(nil, raw[:12], raw[12:], nil)
+	if len(raw) < aead.NonceSize()+1 {
+		return interactshRecord{}, fmt.Errorf("oob: interaction record is too short")
+	}
+	plain, err := aead.Open(nil, raw[:aead.NonceSize()], raw[aead.NonceSize():], nil)
 	if err != nil {
 		return interactshRecord{}, err
 	}
@@ -394,18 +454,18 @@ type interactshRecord struct {
 
 // interaction turns a record into what the checks are written against.
 func (r interactshRecord) interaction(fallback string) checks.Interaction {
+	// The detail names the callback first, because that is what ties the record to the
+	// injection that minted it, and then what was asked for. The name cannot be dropped in
+	// favour of the request line: an HTTP callback carries the token in its Host header and a
+	// DNS one has none in its first line, so a reader that kept only the line would lose the
+	// only thing that says which injection this was.
 	detail := r.FullID
 	switch {
 	case r.Protocol == "http" || r.RawRequest != "":
-		// The request line is what proves an HTTP callback, and it carries the
-		// path the payload asked for.
 		if line, _, ok := strings.Cut(r.RawRequest, "\r\n"); ok && line != "" {
-			detail = line
+			detail = strings.TrimSpace(r.FullID + " " + line)
 		} else if r.RawRequest != "" {
-			detail = r.RawRequest
-		}
-		if r.RawRequest == "" {
-			detail = r.FullID
+			detail = strings.TrimSpace(r.FullID + " " + r.RawRequest)
 		}
 	case r.QueryType != "":
 		detail = r.FullID + " (" + r.QueryType + ")"
@@ -435,6 +495,11 @@ func (r interactshRecord) interaction(fallback string) checks.Interaction {
 // a DNS label.
 func randomString(n int) string {
 	const alphabet = "abcdefghijklmnopqrstuvwxyz0123456789"
+	return randomFrom(alphabet, n)
+}
+
+// randomFrom returns n characters drawn uniformly from an alphabet.
+func randomFrom(alphabet string, n int) string {
 	out := make([]byte, n)
 	for idx := range out {
 		out[idx] = alphabet[randomIndex(len(alphabet))]
