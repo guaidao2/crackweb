@@ -527,7 +527,7 @@ func (sqliBoolean) Run(ctx context.Context, c *checks.Context, t *checks.Target)
 			return booleanBranch{value: value, response: response, fp: fp}, request, true
 		}
 
-		trueOne, trueReq, ok := probe(family.trueValues[0])
+		trueOne, _, ok := probe(family.trueValues[0])
 		if !ok {
 			continue
 		}
@@ -535,7 +535,7 @@ func (sqliBoolean) Run(ctx context.Context, c *checks.Context, t *checks.Target)
 		if !ok {
 			continue
 		}
-		falseOne, _, ok := probe(family.falseValues[0])
+		falseOne, falseReq, ok := probe(family.falseValues[0])
 		if !ok {
 			continue
 		}
@@ -576,7 +576,7 @@ func (sqliBoolean) Run(ctx context.Context, c *checks.Context, t *checks.Target)
 		f.Payload = falseOne.value
 		f.CWE = "CWE-89"
 		f.References = sqlReferences
-		f.Evidence.Request = trueReq.Raw()
+		f.Evidence.Request = falseReq.Raw()
 		f.Evidence.Response = truncate(falseOne.response.Body, 8192)
 		f.Evidence.Baseline = truncate(t.Response.Body, 4096)
 		f.Evidence.Matches = []string{

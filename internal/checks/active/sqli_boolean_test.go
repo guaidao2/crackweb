@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"regexp"
 	"strings"
 	"testing"
@@ -84,6 +85,17 @@ func TestSQLiBooleanFiresOnAWidenedResultSet(t *testing.T) {
 		t.Fatal("a widened result set was not reported")
 	}
 	t.Logf("reported: %v", findings[0].Evidence.Matches)
+
+	// The request the finding carries has to be the one that sent the payload it names: that
+	// request is what a reader pastes back to reproduce the finding.
+	raw := string(findings[0].Evidence.Request)
+	decoded, err := url.QueryUnescape(raw)
+	if err != nil {
+		decoded = raw
+	}
+	if !strings.Contains(decoded, findings[0].Payload) {
+		t.Errorf("the evidence request does not carry the payload %q:\n%s", findings[0].Payload, raw)
+	}
 }
 
 // TestSQLiBooleanIgnoresAShrinkingPage is the case observed on a real target.
