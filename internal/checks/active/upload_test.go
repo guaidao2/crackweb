@@ -402,7 +402,7 @@ func TestUploadFiresOnArchiveAndConfigNames(t *testing.T) {
 func TestUploadStaysQuietWhenThePageNeverVaries(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// One page, always, regardless of the name in the body.
-		fmt.Fprint(w, "<html><body>Vulinbox - File Upload to: /upload/case/safe "+
+		fmt.Fprint(w, "<html><body>Uploaded to: /upload/case/safe "+
 			strings.Repeat("Choose file ", 30)+"</body></html>")
 	}))
 	defer server.Close()

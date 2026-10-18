@@ -5,25 +5,25 @@ import "testing"
 // TestAddressSpellingsCoverTheOtherWritings: each spelling is the same address to
 // a resolver and a different string to a filter.
 func TestAddressSpellingsCoverTheOtherWritings(t *testing.T) {
-	spellings := addressSpellings("192.168.44.149:8081")
+	spellings := addressSpellings("192.0.2.10:8081")
 	if spellings == nil {
 		t.Fatal("a dotted address has other spellings")
 	}
 	want := map[string]string{
-		CallbackHostDecimal: "3232246933:8081",
-		CallbackHostHex:     "0xc0a82c95:8081",
-		CallbackHostOctal:   "0300.0250.054.0225:8081",
-		CallbackHostMapped:  "[::ffff:192.168.44.149]:8081",
+		CallbackHostDecimal: "3221225994:8081",
+		CallbackHostHex:     "0xc000020a:8081",
+		CallbackHostOctal:   "0300.00.02.012:8081",
+		CallbackHostMapped:  "[::ffff:192.0.2.10]:8081",
 	}
 	for placeholder, expected := range want {
 		if got := spellings[placeholder]; got != expected {
 			t.Errorf("%s = %q, want %q", placeholder, got, expected)
 		}
 	}
-	// The octets between the first and the last are not zero here, so the short
-	// form would name a different host and must not be offered at all.
+	// The middle octets are not all zero, so the short form would name a different
+	// host and must not be offered at all.
 	if got, ok := spellings[CallbackHostShort]; ok {
-		t.Errorf("short form offered for 192.168.44.149: %q", got)
+		t.Errorf("short form offered for 192.0.2.10: %q", got)
 	}
 }
 
@@ -59,8 +59,8 @@ func TestAddressSpellingsRefuseWhatIsNotAnAddress(t *testing.T) {
 func TestSubstituteCallbackFillsTheNumericPlaceholders(t *testing.T) {
 	got := substituteCallback(
 		"http://"+CallbackHostDecimal+"/?url="+CallbackURL,
-		"http://192.168.44.149:8081/ab12")
-	want := "http://3232246933:8081/?url=http://192.168.44.149:8081/ab12"
+		"http://192.0.2.10:8081/ab12")
+	want := "http://3221225994:8081/?url=http://192.0.2.10:8081/ab12"
 	if got != want {
 		t.Errorf("got %q, want %q", got, want)
 	}
@@ -75,8 +75,8 @@ func TestSubstituteCallbackDropsWhatItCannotFill(t *testing.T) {
 }
 
 func TestSubstituteCallbackLeavesOrdinarySeedsAlone(t *testing.T) {
-	got := substituteCallback(CallbackURL+"/x", "http://192.168.44.149:8081/ab12")
-	if want := "http://192.168.44.149:8081/ab12/x"; got != want {
+	got := substituteCallback(CallbackURL+"/x", "http://192.0.2.10:8081/ab12")
+	if want := "http://192.0.2.10:8081/ab12/x"; got != want {
 		t.Errorf("got %q, want %q", got, want)
 	}
 }
