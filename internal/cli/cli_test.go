@@ -4,6 +4,9 @@ import (
 	"bytes"
 	"strings"
 	"testing"
+
+	"github.com/guaidao2/crackweb/internal/finding"
+	"github.com/guaidao2/crackweb/internal/i18n"
 )
 
 // run executes crackweb's entry point with captured output and a neutral
@@ -59,6 +62,41 @@ func TestEveryLanguageSwitchWorks(t *testing.T) {
 				t.Errorf("output is not in Chinese:\n%s", out.String())
 			}
 		})
+	}
+}
+
+// TestPrintFindingCarriesTheRequestToReplay covers the terminal view of a finding: the payload
+// line is clipped to a screen's width, so the command under it is what somebody copies. A scan
+// run without a report has to be replayable from the screen alone.
+func TestPrintFindingCarriesTheRequestToReplay(t *testing.T) {
+	var out bytes.Buffer
+	app := newApp(i18n.EN, &out, &out, globalOptions{})
+
+	payload := "php://filter/convert.base64-encode/resource=" + strings.Repeat("a", 200)
+	f := &finding.Finding{
+		CheckID:  "path-traversal",
+		Title:    "Path traversal",
+		Severity: finding.SeverityHigh,
+		Method:   "GET",
+		URL:      "http://example.com/?page=" + payload,
+		Param:    "page",
+		Payload:  payload,
+	}
+	f.Evidence.Request = []byte("GET /?page=" + payload + " HTTP/1.1\r\nHost: example.com\r\n\r\n")
+
+	app.printFinding(f)
+
+	printed := out.String()
+	if !strings.Contains(printed, "curl: curl ") {
+		t.Fatalf("the finding carries no command to replay it:\n%s", printed)
+	}
+	// The payload line is shortened on purpose; the command must not be, or the one thing the
+	// reader wants to copy would be missing its tail.
+	if !strings.Contains(printed, payload) {
+		t.Errorf("the command is missing the payload it was sent with:\n%s", printed)
+	}
+	if strings.Contains(printed, "Payload: "+payload) {
+		t.Errorf("the payload line is no longer shortened:\n%s", printed)
 	}
 }
 

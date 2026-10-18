@@ -273,7 +273,7 @@ func Markdown(w io.Writer, data *Data) error {
 			fmt.Fprintf(out, "**%s**\n\n```http\n%s\n```\n\n",
 				bundle.T(i18n.KeyReportFieldRequest), truncateText(string(f.Evidence.Request), 4000))
 		}
-		if curl := curlCommand(f.Evidence.Request); curl != "" {
+		if curl := CurlCommand(f.Evidence.Request); curl != "" {
 			fmt.Fprintf(out, "**%s**\n\n```sh\n%s\n```\n\n", bundle.T(i18n.KeyReportCurl), curl)
 		}
 		if len(f.References) > 0 {

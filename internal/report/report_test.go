@@ -323,7 +323,7 @@ func TestWriteProducesEveryFormat(t *testing.T) {
 // not just a string that mentions curl.
 func TestCurlCommandIsRunnable(t *testing.T) {
 	raw := []byte("POST /login HTTP/1.1\r\nHost: example.com\r\nContent-Type: application/x-www-form-urlencoded\r\n\r\nuser=admin&pass=1'")
-	command := curlCommand(raw)
+	command := CurlCommand(raw)
 
 	for _, want := range []string{"curl", "-X POST", "http://example.com/login", "--data-binary", "user=admin"} {
 		if !strings.Contains(command, want) {

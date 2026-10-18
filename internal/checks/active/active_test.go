@@ -2,6 +2,7 @@ package active
 
 import (
 	"context"
+	"encoding/base64"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -184,6 +185,79 @@ func TestPathTraversalFiresOnFileContents(t *testing.T) {
 	}
 	if !strings.Contains(strings.Join(findings[0].Evidence.Matches, " "), "root:x:0:0") {
 		t.Errorf("evidence does not include the file contents: %v", findings[0].Evidence.Matches)
+	}
+}
+
+// TestPathTraversalFiresWhenTheIncludeAppendsAnExtension covers the inclusion that writes the
+// extension itself: `include($page . ".php")` resolves an absolute path to a file that does not
+// exist, and the application's own script is still readable when it is named without the extension.
+func TestPathTraversalFiresWhenTheIncludeAppendsAnExtension(t *testing.T) {
+	source := "<?php\n// Entry point.\ninclude($_GET['page'] . '.php');\n"
+	var seen []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		page := r.URL.Query().Get("page")
+		seen = append(seen, page)
+		const wrapper = "php://filter/convert.base64-encode/resource="
+		// Only the name without the extension is read: the application appends `.php` to
+		// whatever it is given, so `index.php` would be opened as `index.php.php`, and a
+		// path to a system file would be opened as a name that does not exist.
+		if strings.TrimPrefix(page, wrapper) == "index" {
+			// The application reads its own script and prints it base64-encoded.
+			fmt.Fprintf(w, "<html><body><hr/><br/>%s</body></html>",
+				base64.StdEncoding.EncodeToString([]byte(source)))
+			return
+		}
+		// Everything else is a page that does not exist.
+		fmt.Fprint(w, "<html><body><hr/><br/></body></html>")
+	}))
+	defer server.Close()
+
+	h := newHarness(t)
+	findings := withParameter(t, h, pathTraversal{}, server.URL+"/?page=login")
+
+	if len(findings) == 0 {
+		t.Fatalf("an inclusion that appends its own extension was not detected; the check sent %d request(s): %v",
+			len(seen), seen)
+	}
+	if !strings.Contains(strings.Join(findings[0].Evidence.Matches, " "), "<?php") {
+		t.Errorf("evidence does not name what was read: %v", findings[0].Evidence.Matches)
+	}
+}
+
+// TestPathTraversalStaysQuietWhenThePagePublishesEncodedSource: a page that shows base64 of a PHP
+// snippet carries the source shape before any payload is sent, and reporting it would be a false
+// positive on every page that prints code.
+func TestPathTraversalStaysQuietWhenThePagePublishesEncodedSource(t *testing.T) {
+	snippet := base64.StdEncoding.EncodeToString([]byte(
+		"<?php\n// A snippet a tutorial page would print.\nfunction demo() { return 42; }\n"))
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		fmt.Fprintf(w, "<html><body><pre>%s</pre></body></html>", snippet)
+	}))
+	defer server.Close()
+
+	h := newHarness(t)
+	if findings := withParameter(t, h, pathTraversal{}, server.URL+"/?page=login"); len(findings) != 0 {
+		t.Errorf("a page that publishes encoded source was reported as traversal: %+v", findings)
+	}
+}
+
+// TestTheSourceShapeIsWhatMakesARead pins the evidence rule the wrapper seeds rest on: text that
+// opens as a PHP file is source, and the tag appearing somewhere in a page is not.
+func TestTheSourceShapeIsWhatMakesARead(t *testing.T) {
+	cases := map[string]bool{
+		"<?php\necho 1;\n":                           true,
+		"\n\t <?php include $page; ?>":               true,
+		"\ufeff<?php // byte order mark first":       true,
+		"<p>Wrap the code in <?php tags</p>":         false,
+		"<?xml version=\"1.0\" encoding=\"utf-8\"?>": false,
+		"root:x:0:0:root:/root:/bin/bash":            false,
+	}
+	for view, want := range cases {
+		if got := looksLikePHPSource(view); got != want {
+			t.Errorf("looksLikePHPSource(%q) = %v, want %v", view, got, want)
+		}
 	}
 }
 

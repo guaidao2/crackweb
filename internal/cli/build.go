@@ -494,6 +494,12 @@ func (a *App) printFinding(f *finding.Finding) {
 	if f.Payload != "" {
 		a.Printf("    %s: %s", a.T(i18n.KeyReportFieldPayload), truncateForDisplay(f.Payload, 120))
 	}
+	// The payload line is shortened to fit a screen. The command carries it whole, so a finding
+	// seen on the terminal can be replayed without a report. The `curl:` label makes the line a
+	// field to anything reading this output rather than free text containing a URL.
+	if curl := report.CurlCommand(f.Evidence.Request); curl != "" {
+		a.Printf("    curl: %s", curl)
+	}
 	a.Print("")
 }
 

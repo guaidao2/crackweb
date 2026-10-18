@@ -245,7 +245,7 @@ func buildFindingCard(bundle *i18n.Bundle, f *finding.Finding, index int) findin
 		Response:   string(f.Evidence.Response),
 		Baseline:   string(f.Evidence.Baseline),
 		HasBase:    len(f.Evidence.Baseline) > 0,
-		Curl:       curlCommand(f.Evidence.Request),
+		Curl:       CurlCommand(f.Evidence.Request),
 	}
 	if f.Evidence.ResponseTruncated {
 		card.Response += "\n\n[truncated]"

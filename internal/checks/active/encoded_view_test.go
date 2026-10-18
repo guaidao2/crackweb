@@ -54,3 +54,18 @@ func TestDecodedViewsIgnoresRunsThatDecodeToNoise(t *testing.T) {
 		t.Errorf("a run that decodes to noise was treated as text: %v", views)
 	}
 }
+
+// TestDecodedViewsFindsAFileBehindABiggerBlob: the content a target read need not be the largest
+// run on the page. A form carrying a captcha — or any page with a data URI — hides a shorter run
+// from a reader that decodes only the longest.
+func TestDecodedViewsFindsAFileBehindABiggerBlob(t *testing.T) {
+	file := "root:x:0:0:root:/root:/bin/bash\ndaemon:x:1:1:daemon:/usr/sbin:/usr/sbin/nologin\n"
+	captcha := strings.Repeat("QUJDREVGR0g", 40) // longer than the file, and decodes to text
+	body := `<img src="data:image/png;base64,` + captcha + `"><pre>` +
+		base64.StdEncoding.EncodeToString([]byte(file)) + "</pre>"
+
+	views := decodedViews([]byte(body))
+	if !strings.Contains(strings.Join(views, "\n"), "root:x:0:0") {
+		t.Errorf("the file behind a larger blob was not decoded: %d view(s)", len(views))
+	}
+}

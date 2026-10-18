@@ -40,6 +40,13 @@ var traversalSeeds = []string{
 	// chooses the encoding of, and a filter that blocks `../` says nothing about
 	// them.
 	"php://filter/convert.base64-encode/resource=/etc/passwd",
+	// An inclusion that appends an extension — `include($page . ".php")` — resolves every
+	// absolute path above to a file that does not exist: `/etc/passwd` opens as
+	// `/etc/passwd.php`. The application's own script is still reachable when it is named
+	// without the extension the code adds.
+	"php://filter/convert.base64-encode/resource=index.php",
+	"php://filter/convert.base64-encode/resource=index",
+	"php://filter/convert.base64-encode/resource=../index",
 	"expect://id",
 	// Path-normalisation confusion. Servers and their front-ends disagree about
 	// what these resolve to, and a check that only tried `../` sequences would
@@ -90,6 +97,16 @@ var traversalSignatures = []string{
 	"uid=0(",
 }
 
+// looksLikePHPSource reports whether a view opens as a PHP file.
+//
+// The wrapper seeds read the application's own script, and a script opens with the tag below.
+// Matching it as a signature is not enough: five characters are as likely to appear in prose as at
+// the start of a file. A page that already opens with it is in the baseline, so seeing it again is
+// not a disclosure.
+func looksLikePHPSource(view string) bool {
+	return strings.HasPrefix(strings.TrimLeft(view, " \t\r\n\ufeff"), "<?php")
+}
+
 // pathTraversal detects directory traversal and local file inclusion.
 type pathTraversal struct{}
 
@@ -107,7 +124,22 @@ func (pathTraversal) Run(ctx context.Context, c *checks.Context, t *checks.Targe
 	if t.Param == nil || t.Response == nil {
 		return nil
 	}
-	baseline := strings.ToLower(string(t.Response.Body))
+	// The page as it stands and as it decodes, taken before any payload is sent: a signature found
+	// here belongs to the page, not to a read.
+	//
+	// The views are joined rather than compared one by one, because matching view against view
+	// assumes the two responses encode the same content in the same place. The joined form errs
+	// towards silence: a page carrying a signature anywhere keeps later reads of it quiet.
+	baselineViews := decodedViews(t.Response.Body)
+	baseline := strings.ToLower(strings.Join(baselineViews, "\x00"))
+	// A page that already opens as PHP source is not disclosing anything when it does so again.
+	sourceOnThePage := false
+	for _, view := range baselineViews {
+		if looksLikePHPSource(view) {
+			sourceOnThePage = true
+			break
+		}
+	}
 	c.ProbeWAF(ctx, t)
 
 	var matched, matchedView string
@@ -116,6 +148,12 @@ func (pathTraversal) Run(ctx context.Context, c *checks.Context, t *checks.Targe
 			// The file may have been read and then printed through an encoding, in which case
 			// the signature is present but not in the clear.
 			for _, view := range decodedViews(resp.Body) {
+				// The wrapper seeds read the application's own script, so the response opens
+				// with the tag every PHP file opens with.
+				if !sourceOnThePage && looksLikePHPSource(view) {
+					matched, matchedView = "<?php", view
+					return true
+				}
 				if found := firstNewSignature(strings.ToLower(view), baseline, traversalSignatures); found != "" {
 					matched, matchedView = found, view
 					return true

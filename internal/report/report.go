@@ -257,9 +257,9 @@ var severityOrder = []finding.Severity{
 	finding.SeverityInfo,
 }
 
-// curlCommand renders a raw request as a curl command, so a reader can replay a
+// CurlCommand renders a raw request as a curl command, so a reader can replay a
 // finding without reconstructing it by hand.
-func curlCommand(raw []byte) string {
+func CurlCommand(raw []byte) string {
 	if len(raw) == 0 {
 		return ""
 	}
@@ -434,7 +434,7 @@ func jsonFindingFor(bundle *i18n.Bundle, f *finding.Finding) jsonFinding {
 		Description: descriptionText(bundle, f),
 		Remediation: remediationText(bundle, f),
 		References:  f.References,
-		Curl:        curlCommand(f.Evidence.Request),
+		Curl:        CurlCommand(f.Evidence.Request),
 	}
 	out.Evidence.Matches = f.Evidence.Matches
 	out.Evidence.Diff = f.Evidence.Diff

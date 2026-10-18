@@ -21,71 +21,96 @@ import (
 const (
 	encodedRunMinimum = 40
 	decodedTextRatio  = 0.9
+	// encodedViewLimit bounds how many runs of one body are decoded. A page can carry several long
+	// runs — a session token, an inline image, a data URI — and the content a target read need not
+	// be the longest of them. Every view costs a signature scan, so the longest few are decoded.
+	encodedViewLimit = 4
 )
 
 func decodedViews(body []byte) []string {
 	text := string(body)
 	views := []string{text}
-	if decoded, ok := decodeLongRun(text, isBase64Char, func(run string) ([]byte, bool) {
-		// Padding is only valid at the end and the length has to be a multiple of four, so a
-		// run that fails those is not base64 of anything — it is a word that happens to use
-		// the alphabet.
-		if len(run)%4 != 0 {
-			if trimmed := strings.TrimRight(run, "="); len(trimmed)%4 != 1 {
-				if padded := trimmed + strings.Repeat("=", (4-len(trimmed)%4)%4); len(padded)%4 == 0 {
-					run = padded
-				}
-			}
-		}
-		out, err := base64.StdEncoding.DecodeString(run)
-		return out, err == nil
-	}); ok {
-		views = append(views, string(decoded))
-	}
-	if decoded, ok := decodeLongRun(text, isHexChar, func(run string) ([]byte, bool) {
-		if len(run)%2 != 0 {
-			run = run[:len(run)-1]
-		}
-		out, err := hex.DecodeString(run)
-		return out, err == nil
-	}); ok {
-		views = append(views, string(decoded))
-	}
+	views = append(views, decodeRuns(text, isBase64Char, decodeBase64Candidate)...)
+	views = append(views, decodeRuns(text, isHexChar, decodeHexCandidate)...)
 	return views
 }
 
-// decodeLongRun finds the longest run of characters the predicate accepts, decodes it, and
-// returns the result when it looks like text. It is the caller's decoder that decides whether
-// the run means anything at all.
-func decodeLongRun(text string, accept func(byte) bool, decode func(string) ([]byte, bool)) ([]byte, bool) {
-	best, current := 0, strings.Builder{}
-	bestRun := ""
-	flush := func() {
-		run := current.String()
-		if len(run) > best {
-			best, bestRun = len(run), run
+// decodeBase64Candidate decodes one run when it is base64 at all.
+func decodeBase64Candidate(run string) ([]byte, bool) {
+	// Padding is only valid at the end and the length has to be a multiple of four, so a run
+	// that fails those is not base64 of anything — it is a word that happens to use the
+	// alphabet.
+	if len(run)%4 != 0 {
+		if trimmed := strings.TrimRight(run, "="); len(trimmed)%4 != 1 {
+			if padded := trimmed + strings.Repeat("=", (4-len(trimmed)%4)%4); len(padded)%4 == 0 {
+				run = padded
+			}
 		}
-		current.Reset()
 	}
+	out, err := base64.StdEncoding.DecodeString(run)
+	return out, err == nil
+}
+
+// decodeHexCandidate decodes one run when it is hex at all.
+func decodeHexCandidate(run string) ([]byte, bool) {
+	if len(run)%2 != 0 {
+		run = run[:len(run)-1]
+	}
+	out, err := hex.DecodeString(run)
+	return out, err == nil
+}
+
+// decodeRuns decodes the longest runs of characters the predicate accepts, longest first, and
+// returns the ones that decode to text. The caller's decoder decides whether a run means anything.
+//
+// More than one run is decoded because the content a target read need not be the largest run on the
+// page: a form carrying a captcha beside an inclusion would otherwise hide the smaller one.
+func decodeRuns(text string, accept func(byte) bool, decode func(string) ([]byte, bool)) []string {
+	var longest []string
+	offer := func(run string) {
+		if len(run) < encodedRunMinimum {
+			return
+		}
+		// Keep the longest few, in order, without sorting what a large page can hold: a body of
+		// five megabytes holds a hundred thousand runs that qualify.
+		position := len(longest)
+		for index, existing := range longest {
+			if len(run) > len(existing) {
+				position = index
+				break
+			}
+		}
+		if position >= encodedViewLimit {
+			return
+		}
+		longest = append(longest, "")
+		copy(longest[position+1:], longest[position:])
+		longest[position] = run
+		if len(longest) > encodedViewLimit {
+			longest = longest[:encodedViewLimit]
+		}
+	}
+
+	current := strings.Builder{}
 	for i := 0; i < len(text); i++ {
 		if accept(text[i]) {
 			current.WriteByte(text[i])
 			continue
 		}
-		flush()
+		offer(current.String())
+		current.Reset()
 	}
-	flush()
-	if len(bestRun) < encodedRunMinimum {
-		return nil, false
+	offer(current.String())
+
+	views := make([]string, 0, len(longest))
+	for _, run := range longest {
+		decoded, ok := decode(run)
+		if !ok || len(decoded) < encodedRunMinimum/2 || !looksLikeText(decoded) {
+			continue
+		}
+		views = append(views, string(decoded))
 	}
-	decoded, ok := decode(bestRun)
-	if !ok || len(decoded) < encodedRunMinimum/2 {
-		return nil, false
-	}
-	if !looksLikeText(decoded) {
-		return nil, false
-	}
-	return decoded, true
+	return views
 }
 
 func isBase64Char(c byte) bool {
