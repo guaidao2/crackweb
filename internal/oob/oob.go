@@ -57,9 +57,34 @@ type Options struct {
 	// Token is an operator-supplied secret mixed into every callback name, so
 	// that two servers sharing a host do not mint colliding names.
 	Token string
+	// RebindFirst and RebindSecond are the two addresses a DNS-rebinding name
+	// answers with: RebindFirst on the first A lookup, RebindSecond on every
+	// lookup after it. They are what expresses a name whose address changes
+	// between the validation a target does and the fetch it makes.
+	//
+	// RebindFirst defaults to a public documentation address (TEST-NET-3), so a
+	// fetch that follows the first answer reaches nothing at all — which is what
+	// makes a later connection back the proof that the *second* answer was used.
+	// RebindSecond defaults to the address this server's HTTP listener is
+	// reachable at when that is a loopback or private address, so the target can
+	// connect to it; when the listener is only publicly reachable it falls back
+	// to loopback, where a co-located target can still reach it.
+	RebindFirst  net.IP
+	RebindSecond net.IP
 	// Logf receives status messages.
 	Logf func(format string, args ...any)
 }
+
+// defaultRebindFirst is the address a rebinding name answers with first: a
+// TEST-NET-3 documentation address, globally classified as unicast (so it passes
+// a check that refuses private ranges) but routed nowhere (so a fetch that
+// follows it reaches no listener of ours).
+var defaultRebindFirst = net.IPv4(203, 0, 113, 1)
+
+// rebindTTL is the TTL on a rebinding answer. Zero means "do not cache", so the
+// second lookup reaches this server rather than being answered from a resolver's
+// memory — which is the whole point of a rebinding name.
+const rebindTTL = 0
 
 // Event is one observed callback, for operator-facing output.
 type Event struct {
@@ -93,6 +118,11 @@ type Server struct {
 	// labels record what a token was created for, so a report can say which
 	// check a callback belongs to.
 	labels map[string]string
+	// rebinds marks the tokens that were minted as DNS-rebinding names, and
+	// rebindHits counts how many A lookups each has answered so the answer can
+	// change from the configured first address to the second.
+	rebinds    map[string]bool
+	rebindHits map[string]int
 
 	closeOnce sync.Once
 	done      chan struct{}
@@ -113,6 +143,8 @@ func New(opts Options) *Server {
 		opts:         opts,
 		interactions: make(map[string][]checks.Interaction),
 		labels:       make(map[string]string),
+		rebinds:      make(map[string]bool),
+		rebindHits:   make(map[string]int),
 		done:         make(chan struct{}),
 	}
 }
@@ -124,6 +156,18 @@ func (s *Server) Start(ctx context.Context) error {
 		return fmt.Errorf("oob: listen for HTTP callbacks on %s: %w", s.opts.HTTPAddr, err)
 	}
 	s.httpListen = httpListener
+
+	// Resolve the rebinding defaults now that the HTTP listener is bound: which
+	// address a rebinding name should hand out second depends on where this
+	// server can actually be reached.
+	if s.opts.Domain != "" {
+		if s.opts.RebindFirst == nil {
+			s.opts.RebindFirst = defaultRebindFirst
+		}
+		if s.opts.RebindSecond == nil {
+			s.opts.RebindSecond = s.defaultRebindSecond()
+		}
+	}
 
 	// DNS is best-effort: a scan is still useful with only HTTP callbacks, and
 	// port 53 or a delegated domain may be unavailable.
@@ -207,6 +251,92 @@ func (s *Server) NewURL(label string) (callbackURL, token string) {
 		return "http://" + token + "." + s.opts.Domain + "/", token
 	}
 	return "http://" + s.callbackHost() + "/" + token, token
+}
+
+// NewRebindURL mints a DNS-rebinding name and the token that identifies it, for
+// a check that needs the address of a name to change between two lookups.
+//
+// The name is <token>.rebind.<domain>, so it is only expressible with a
+// delegated domain — this server has to be the one answering the lookup for the
+// answer to change. The returned URL carries this server's HTTP port, so that a
+// target which follows the *second* answer (a loopback or private address)
+// reaches our listener and shows up as a callback: that connection is the proof
+// that the rebound address was fetched, not merely resolved.
+func (s *Server) NewRebindURL(label string) (callbackURL, token string) {
+	if s.opts.Domain == "" {
+		return "", ""
+	}
+	token = s.mintToken()
+
+	s.mu.Lock()
+	s.labels[token] = label
+	s.rebinds[token] = true
+	s.rebindHits[token] = 0
+	s.mu.Unlock()
+
+	authority := net.JoinHostPort(token+".rebind."+s.opts.Domain, s.httpPort())
+	return "http://" + authority + "/", token
+}
+
+// httpPort returns the port the HTTP listener answers on, so a rebinding URL can
+// name it. Before Start the configured address is used, which is what a caller
+// that builds a URL early would expect.
+func (s *Server) httpPort() string {
+	if _, port, err := net.SplitHostPort(s.HTTPAddr()); err == nil && port != "" {
+		return port
+	}
+	return "80"
+}
+
+// defaultRebindSecond picks the address a rebinding name answers with after the
+// first lookup: the place this server's HTTP listener can be reached, when that
+// place is a loopback or private address. A public listener is not useful here —
+// rebinding to a public address would demonstrate no bypass of a private-address
+// filter — so it falls back to loopback, where a co-located target can still
+// reach the listener.
+func (s *Server) defaultRebindSecond() net.IP {
+	if host, _, err := net.SplitHostPort(s.httpListen.Addr().String()); err == nil {
+		if ip := net.ParseIP(host); isLocalAddress(ip) {
+			return ip
+		}
+	}
+	if out := net.ParseIP(localOutboundIP()); isLocalAddress(out) {
+		return out
+	}
+	return net.IPv4(127, 0, 0, 1)
+}
+
+// isLocalAddress reports whether ip is an address a rebinding answer can usefully
+// point at: a loopback or private one, not the unspecified "bind any" address.
+func isLocalAddress(ip net.IP) bool {
+	return ip != nil && !ip.IsUnspecified() && (ip.IsLoopback() || ip.IsPrivate())
+}
+
+// rebindAnswer returns the address a rebinding token should be answered with for
+// the given query type, and whether this token is a rebinding one at all.
+//
+// Only an A query is answered: an AAAA query answered with an A record would be
+// discarded by the resolver, so it is left empty to fall back to the A answer,
+// and the hit counter is not advanced by it.
+func (s *Server) rebindAnswer(token string, qtype uint16) (net.IP, bool) {
+	if token == "" || qtype != dnsTypeA {
+		return nil, false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.rebinds[token] {
+		return nil, false
+	}
+	hits := s.rebindHits[token]
+	s.rebindHits[token] = hits + 1
+	// The first lookup is answered with the public address, every later one with
+	// the loopback/private address. A target that resolves once, validates and
+	// fetches — the rebinding-vulnerable shape — asks twice; a target that only
+	// answers from a cache never asks again.
+	if hits == 0 {
+		return s.opts.RebindFirst, true
+	}
+	return s.opts.RebindSecond, true
 }
 
 // mintToken produces a fresh callback name, mixing in the operator secret when
@@ -401,10 +531,23 @@ func (s *Server) serveDNS() {
 			continue
 		}
 		token := s.tokenFromName(name)
+
+		// A rebinding name is the one case where the answer, not just the
+		// lookup, is the point: its address changes from a public one to a
+		// loopback/private one, and the interaction records which was served so
+		// the evidence can say what the target was told.
+		if ip, rebind := s.rebindAnswer(token, questionType(query, qEnd)); rebind {
+			s.record(token, "dns", remoteIP(addr.String()), name+" -> "+ip.String())
+			if reply := buildDNSReplyA(query, qEnd, ip, rebindTTL); reply != nil {
+				_, _ = s.dnsConn.WriteToUDP(reply, addr)
+			}
+			continue
+		}
+
 		s.record(token, "dns", remoteIP(addr.String()), name)
 
-		// Return a response with no answers: the interaction is the point, not
-		// the resolution.
+		// Every other query is answered with nothing: the interaction is the
+		// point, not the resolution.
 		if reply := buildDNSReply(query, qEnd); reply != nil {
 			_, _ = s.dnsConn.WriteToUDP(reply, addr)
 		}

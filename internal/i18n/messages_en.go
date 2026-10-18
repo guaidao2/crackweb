@@ -775,6 +775,16 @@ var english = map[Key]string{
 	KeyCheckDeserialFix: "Do not accept serialised objects from clients. Use a data format such as " +
 		"JSON with an explicit schema, and if a serialised format is unavoidable, restrict it to an " +
 		"allowlist of types.",
+	KeyCheckShiroTitle: "Apache Shiro rememberMe cookie encrypted with a published default key",
+	KeyCheckShiroDesc: "The cookie this site issued decrypts under an AES key that Apache Shiro " +
+		"has shipped as example configuration, so it is a key anyone can read. Shiro deserialises " +
+		"whatever that cookie holds before it decides who the caller is, so anyone who can encrypt " +
+		"with that key can put a serialised object of their own in it — the step that turns this " +
+		"into remote code execution is the gadget chain, not the key.",
+	KeyCheckShiroFix: "Set a cipher key that is generated per deployment and kept out of source " +
+		"control, and rotate it so every cookie written under an old one stops working. Treat a key " +
+		"that has ever been published as no key at all, and upgrade Shiro so the classes the cookie " +
+		"may deserialise can be restricted.",
 	KeyEvidenceTimingStat: "over %d samples the median was %s against a baseline of %s " +
 		"(variation %s); %s",
 	KeyEvidenceHPP: "the payload was sent as a second occurrence of the same parameter, " +

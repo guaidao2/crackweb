@@ -242,6 +242,14 @@ func (ssrf) Run(ctx context.Context, c *checks.Context, t *checks.Target) []*fin
 		return nil
 	}
 
+	// DNS rebinding first: it is the one form that survives a private-address
+	// check, and it judges on a connection only the rebound answer could produce.
+	// Sending it before the plain callback probe lets a target that also happens
+	// to resolve our name be reported for the sharper reason when both apply.
+	if f := ssrfRebind(ctx, c, t); f != nil {
+		return []*finding.Finding{f}
+	}
+
 	attempt, err := c.ProbeOOB(ctx, t, "ssrf", ssrfSeeds, 0)
 	if err != nil || attempt == nil {
 		return nil
@@ -261,6 +269,145 @@ func (ssrf) Run(ctx context.Context, c *checks.Context, t *checks.Target) []*fin
 	f.Evidence.Response = truncate(attempt.Response.Raw(), 4096)
 	f.Evidence.Matches = []string{describeInteraction(c, attempt)}
 	return []*finding.Finding{f}
+}
+
+// rebindServer is the optional capability a DNS-rebinding probe needs: an
+// out-of-band server that can answer a name with an address that changes between
+// lookups. The listener crackweb runs itself implements it; a third-party
+// interactsh deployment does not, and neither does a self-hosted server with no
+// delegated domain — in both cases NewRebindURL returns empty strings and the
+// probe skips rather than shipping requests whose lookups nothing would answer.
+type rebindServer interface {
+	NewRebindURL(label string) (callbackURL, token string)
+}
+
+// ssrfRebindForms are the URL shapes a rebinding name is planted in. The
+// placeholder is the minted authority; the absolute and protocol-relative forms
+// cover a parameter that wants a scheme and one whose caller supplies its own.
+var ssrfRebindForms = []string{
+	"http://{rebind}/",
+	"//{rebind}/",
+}
+
+// rebindPollInterval is how often the rebinding probe checks for a callback
+// while it waits, matching the plain out-of-band probe's cadence.
+const rebindPollInterval = 250 * time.Millisecond
+
+// ssrfRebind detects SSRF that survives a private-address check by changing what
+// a hostname resolves to between the validation a target performs and the fetch
+// it makes.
+//
+// The evidence is a connection, and it has to be. The name answers with a public
+// documentation address first and a loopback/private one on every later lookup.
+// A target that resolves once and fetches follows the public answer, which
+// reaches nothing of ours, so no callback arrives. Only a target that resolves a
+// second time — the double lookup a rebinding attack depends on — receives the
+// private answer, and only then can a fetch reach our listener and show up here.
+// A target that resolves again but re-validates the second answer and refuses it
+// also produces no callback, so a finding is a connection that could only have
+// come from the rebound address being used, not a bare second lookup.
+//
+// This is why the probe is stricter than the plain callback probe and runs
+// alongside it rather than replacing it: an ordinary SSRF that follows a single
+// answer is still caught by the seeds in ssrfSeeds, and this adds the target that
+// only yields once the address changes underneath it.
+func ssrfRebind(ctx context.Context, c *checks.Context, t *checks.Target) *finding.Finding {
+	rebind, ok := c.OOB.(rebindServer)
+	if !ok {
+		return nil
+	}
+
+	type rebindAttempt struct {
+		token string
+		sent  *checks.Attempt
+	}
+	var pending []rebindAttempt
+
+	for _, form := range ssrfRebindForms {
+		callbackURL, token := rebind.NewRebindURL("ssrf-rebind")
+		if callbackURL == "" || token == "" {
+			// The server cannot express a rebinding name (no delegated domain),
+			// so every form would test nothing.
+			return nil
+		}
+		// The minted URL carries the port a rebound connection should reach; the
+		// scheme is dropped so the authority can be reused under each form.
+		authority := strings.TrimSuffix(strings.TrimPrefix(callbackURL, "http://"), "/")
+		seed := strings.ReplaceAll(form, "{rebind}", authority)
+
+		request, response, err := c.Inject(ctx, t, seed)
+		if err != nil || request == nil || response == nil {
+			continue
+		}
+		if c.WAF.IsBlocked(t.Request.Hostname(), response) {
+			continue
+		}
+		pending = append(pending, rebindAttempt{
+			token: token,
+			sent: &checks.Attempt{
+				Request:  request,
+				Response: response,
+				Variant:  payload.Variant{Value: seed},
+			},
+		})
+	}
+	if len(pending) == 0 {
+		return nil
+	}
+
+	wait := c.OOBWait
+	if wait <= 0 {
+		wait = checks.OOBWait
+	}
+	deadline := time.Now().Add(wait)
+	for {
+		for i := range pending {
+			for _, interaction := range c.OOB.Poll(pending[i].token) {
+				// Only an HTTP callback proves the rebound address was fetched: a
+				// DNS lookup alone says the target re-resolved, which a target
+				// that then refuses the private answer also does.
+				if interaction.Protocol != "http" {
+					continue
+				}
+				pending[i].sent.Interactions = []checks.Interaction{interaction}
+				return rebindFinding(t, pending[i].sent, interaction)
+			}
+		}
+		if time.Now().After(deadline) {
+			return nil
+		}
+		select {
+		case <-time.After(rebindPollInterval):
+		case <-ctx.Done():
+			return nil
+		}
+	}
+}
+
+// rebindFinding renders the finding for a rebinding name whose rebound address
+// was fetched. The seed carries the name, so the evidence names what was planted
+// and what connected back.
+func rebindFinding(t *checks.Target, attempt *checks.Attempt, interaction checks.Interaction) *finding.Finding {
+	f := checks.NewFinding(ssrf{}, t,
+		i18n.KeyCheckSSRFTitle, i18n.KeyCheckSSRFDesc, i18n.KeyCheckSSRFFix)
+	f.Severity = finding.SeverityHigh
+	f.Confidence = finding.ConfidenceCertain
+	f.Payload = attempt.Variant.Value
+	f.CWE = "CWE-918"
+	f.References = []string{
+		"https://owasp.org/www-community/attacks/Server_Side_Request_Forgery",
+		"https://cwe.mitre.org/data/definitions/918.html",
+	}
+	f.Evidence.Request = attempt.Request.Raw()
+	f.Evidence.Response = truncate(attempt.Response.Raw(), 4096)
+	f.Evidence.Matches = []string{
+		"the name in " + attempt.Variant.Value + " first resolved to a public address and then to a " +
+			"loopback/private one; the target fetched the rebound address and connected back (" +
+			interaction.Protocol + " from " + interaction.RemoteAddr + ")",
+		"an address that changes between the check and the fetch is DNS rebinding: the first " +
+			"answer passes a private-address filter, the second reaches an internal address",
+	}
+	return f
 }
 
 // commandInjectionSeeds ask the target to resolve or fetch the callback address.

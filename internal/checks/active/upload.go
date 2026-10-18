@@ -14,6 +14,7 @@ import (
 	"path"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/guaidao2/crackweb/internal/checks"
@@ -462,6 +463,13 @@ func fetchPath(ctx context.Context, c *checks.Context, t *checks.Target, path st
 // createPart writes the file part, declaring the type the form asks for. Without one it is
 // the same `application/octet-stream` a browser would send, which is what every other probe
 // in this check uses.
+//
+// The name goes through %q, which spells a line break as the two characters `\n` — and the
+// path below it, the standard library's own form field, percent-encodes the same break to
+// `%0A`. Neither form puts the byte on the wire, which is what every probe above wants: a name
+// written on one header line is a name every parser reads the same way. The one probe that
+// needs the break to arrive as a byte goes through buildRawPart instead, and nowhere else
+// does.
 func (f *uploadForm) createPart(writer *multipart.Writer, filename string) (io.Writer, error) {
 	if f.contentType == "" {
 		return writer.CreateFormFile(f.fileField, filename)
@@ -706,6 +714,158 @@ func writeFilePart(writer *multipart.Writer, field, filename, contentType string
 	return err
 }
 
+// lineBreakUploadNames are the names the line-break probe sends: one whose break is the last
+// character of the name — the shape CVE-2017-15715 describes — and three that put the break
+// somewhere else a layer could read past.
+//
+// The marker is generated per attempt and carries no extension of its own, so no other probe
+// in this check can have written the file the retrieval looks for: what comes back has to be
+// this probe's own upload.
+func lineBreakUploadNames(marker string) []string {
+	return []string{
+		// The CVE's own shape: the name ends in a line feed, so a pattern anchored to the
+		// end of the name and a filesystem that keeps the byte need not agree about where
+		// the name stops.
+		marker + ".php\n",
+		// The same with a carriage return, which every line-based reader of an HTTP header
+		// treats as the end of the line rather than as part of the name.
+		marker + ".php\r\n",
+		// The break before a harmless extension: a layer that truncates at the break keeps
+		// ".php", and one that reads the whole name sees a picture.
+		marker + ".php\n.jpg",
+		// The break inside the extension: a layer that takes the breaks out reads ".php",
+		// and one that reads to the break reads ".p".
+		marker + ".p\nhp",
+	}
+}
+
+// lineBreakNameSpellings are the names a server that received a name with a line break may
+// have stored it under.
+//
+// The disagreement is the finding, and every reading of the name has to be asked for: the
+// name as it went out, the part before the first break, and the name with every break taken
+// out. A probe that fetched only the first would be blind to the case it exists for — the
+// layer that stored the part before the break, which is the one that ends in an extension.
+func lineBreakNameSpellings(name string) []string {
+	candidates := []string{name}
+	if index := strings.IndexAny(name, "\r\n"); index >= 0 {
+		candidates = append(candidates, name[:index])
+	}
+	if stripped := strings.NewReplacer("\r", "", "\n", "").Replace(name); stripped != name {
+		candidates = append(candidates, stripped)
+	}
+
+	out := candidates[:0]
+	seen := make(map[string]bool, len(candidates))
+	for _, candidate := range candidates {
+		if seen[candidate] {
+			continue
+		}
+		seen[candidate] = true
+		out = append(out, candidate)
+	}
+	return out
+}
+
+// uploadLineBreakName reports an endpoint that refuses a dangerous name and accepts the same
+// name once it carries a line break, storing it under the name the break was hiding.
+//
+// This is CVE-2017-15715 in shape: the name is one string to the layer that validates it and
+// another to the layer that stores it, and the extension the first was meant to refuse is what
+// the second keeps. The break is a byte in the part header — see buildRawPart — because that
+// is the only form two parsers can disagree about; written the way build writes it, it would
+// be `\n` or `%0A`, and neither reader ends the name at a line break that is not there.
+//
+// Three things have to hold, and each is a request this function makes:
+//
+//   - The plain name is refused. Without that there is nothing a break could have got past:
+//     an endpoint that stores that extension anyway is what the names probe already reports,
+//     and reporting it twice is not a second finding.
+//   - The same name carrying the break is accepted, by the answer the endpoint gives a
+//     harmless upload.
+//   - The file is served back, under one of the spellings the break leaves open. Acceptance
+//     alone is what every endpoint that writes to a temporary directory does.
+//
+// The refused name is also fetched before anything is stored: an endpoint that answers "not
+// permitted" and writes the file regardless would otherwise make the retrieval below look
+// like proof that the break worked.
+func uploadLineBreakName(ctx context.Context, c *checks.Context, t *checks.Target, form *uploadForm, base *diff.Fingerprint) *finding.Finding {
+	marker := "crackweblinebreak" + randomSuffix()
+	plain := marker + ".php"
+
+	// The content is the one the retrieval looks for, so a file that is served back can be
+	// recognised as this probe's. The declared type is left as the form's own: the finding
+	// is about the name, and a probe that changed the type too would not separate them.
+	carrier := &uploadForm{fields: form.fields, fileField: form.fileField, content: uploadBenignContent}
+
+	_, plainResponse, err := sendUpload(ctx, c, t, carrier, plain)
+	if err != nil || plainResponse == nil {
+		return nil
+	}
+	if plainResponse.Status < 400 &&
+		diff.CompareFingerprints(base, uploadFingerprint(c, plainResponse, plain)).Score >= uploadSimilarity {
+		// The extension is accepted without any trick, which is the plain finding and not
+		// this one.
+		return nil
+	}
+	if spelling, _, _ := uploadServedUnder(ctx, c, t, carrier, plain); spelling != "" {
+		// Refused in the response and written to disk all the same, so a file served back
+		// after the probe would say nothing about the break.
+		return nil
+	}
+
+	for _, name := range lineBreakUploadNames(marker) {
+		spellings := lineBreakNameSpellings(name)
+		mutated, response, err := sendUploadRawPart(ctx, c, t, carrier, name)
+		if err != nil || response == nil || response.Status >= 400 {
+			continue
+		}
+		// The name has to come off the response in all of its forms: a page that prints what
+		// it stored prints the break-free spelling, and one that prints what it was given
+		// prints the break.
+		if diff.CompareFingerprints(base, uploadFingerprint(c, response, spellings...)).Score < uploadSimilarity {
+			continue
+		}
+		served, address, fetched := uploadServedUnder(ctx, c, t, carrier, spellings...)
+		if served == "" || fetched == nil {
+			continue
+		}
+
+		f := checks.NewFinding(unsafeUpload{}, t,
+			i18n.KeyCheckUploadTitle, i18n.KeyCheckUploadDesc, i18n.KeyCheckUploadFix)
+		f.Severity = finding.SeverityMedium
+		// Firm: the name was refused on its own and the file is served back under the name
+		// the break was hiding, in the same run. What is left to interpretation is why the
+		// two layers disagree, and that is an implementation detail of each of them.
+		f.Confidence = finding.ConfidenceFirm
+		f.Method = mutated.Method
+		f.URL = mutated.URLString()
+		// The name is spelled here rather than carried as it stands: a raw break in a report
+		// field is a line of output nobody can read. The bytes themselves are in the request
+		// this finding records.
+		f.Payload = strconv.Quote(name) + " (the file name carries a line break, as a byte)"
+		f.CWE = "CWE-434"
+		f.References = []string{
+			"https://owasp.org/www-community/vulnerabilities/Unrestricted_File_Upload",
+			"https://cwe.mitre.org/data/definitions/434.html",
+			"https://nvd.nist.gov/vuln/detail/CVE-2017-15715",
+		}
+		f.Evidence.Request = mutated.Raw()
+		f.Evidence.Response = truncate(fetched.Body, 8192)
+		f.Evidence.Baseline = truncate(t.Response.Body, 4096)
+		f.Evidence.Matches = []string{
+			plain + " was refused on its own, and " + strconv.Quote(name) +
+				" was accepted beside it",
+			"the file was served back from " + address + " as " + strconv.Quote(served) +
+				": the layer that validated the name and the layer that stored it read it " +
+				"differently",
+		}
+		f.Evidence.Diff = string(fetched.Body)[:min(len(fetched.Body), 200)]
+		return f
+	}
+	return nil
+}
+
 // uploadHtaccessChain reports an endpoint that will store an Apache configuration file
 // beside the files it serves.
 //
@@ -826,6 +986,13 @@ func (unsafeUpload) Run(ctx context.Context, c *checks.Context, t *checks.Target
 	// Before the names: an endpoint whose validation and storage disagree is a stronger
 	// claim than one that merely accepts a dangerous name.
 	if f := uploadDuplicateField(ctx, c, t, form, base); f != nil {
+		return []*finding.Finding{f}
+	}
+	// And a disagreement about the name itself, which is the same claim made inside one
+	// header line: refused as written, accepted with a break in it, stored as the break-free
+	// spelling. It is asked before the names because the refusal it rests on is a refusal of
+	// the very name the names probe would otherwise report.
+	if f := uploadLineBreakName(ctx, c, t, form, base); f != nil {
 		return []*finding.Finding{f}
 	}
 
@@ -989,7 +1156,46 @@ func (f *uploadForm) build(filename string) ([]byte, string) {
 	return buf.Bytes(), writer.FormDataContentType()
 }
 
-// sendUpload rebuilds a multipart request with a new filename and sends it.
+// buildRawPart renders the form again with the file name written into the part header as it
+// stands.
+//
+// build cannot express the names the line-break probe is about: whichever part builder it
+// takes, the break is written as something else — %q spells it `\n`, and the standard
+// library's form field percent-encodes it to `%0A` — and a name whose break is not a byte is a
+// name no two parsers disagree about. Only that one header line is written by hand. The
+// fields are the writer's, as they are in build, and so are the boundary, the delimiters and
+// the closing delimiter — the body is framed exactly as build frames it, and the only bytes
+// that differ are the name's.
+func (f *uploadForm) buildRawPart(filename string) ([]byte, string) {
+	var buf bytes.Buffer
+	writer := multipart.NewWriter(&buf)
+
+	fields := append([]httpmsg.KV(nil), f.fields...)
+	sort.SliceStable(fields, func(i, j int) bool { return fields[i].Name < fields[j].Name })
+	for _, field := range fields {
+		_ = writer.WriteField(field.Name, field.Value)
+	}
+
+	contentType := f.contentType
+	if contentType == "" {
+		contentType = "application/octet-stream"
+	}
+	// A field part ends without a line break of its own: the delimiter's leading CRLF is what
+	// ends it, and the first delimiter of a body has none before it.
+	if len(fields) > 0 {
+		buf.WriteString("\r\n")
+	}
+	fmt.Fprintf(&buf, "--%s\r\n", writer.Boundary())
+	fmt.Fprintf(&buf, "Content-Disposition: form-data; name=%q; filename=\"%s\"\r\n",
+		f.fileField, filename)
+	fmt.Fprintf(&buf, "Content-Type: %s\r\n\r\n", contentType)
+	buf.Write(f.content)
+	// The writer closes the body: it writes the CRLF that ends this part and then the closing
+	// delimiter, so the framing is the same one every other probe in this check sends.
+	_ = writer.Close()
+	return buf.Bytes(), writer.FormDataContentType()
+}
+
 // uploadRetrieved reports whether the file just uploaded can be fetched back.
 //
 // Where a target puts an upload is its own business, so the places worth asking are the
@@ -1007,6 +1213,32 @@ func uploadRetrieved(ctx context.Context, c *checks.Context, t *checks.Target, f
 		}
 	}
 	return false
+}
+
+// uploadServedUnder returns the spelling and the address a file this check wrote came back
+// from, with the response, or an empty spelling when none of them served it.
+//
+// A name carrying a line break can be stored under more than one spelling depending on which
+// layer won, and the spelling that is fetchable is the point of the probe — asking only for
+// the name as it went out would leave the disagreement itself unseen.
+func uploadServedUnder(ctx context.Context, c *checks.Context, t *checks.Target, form *uploadForm, names ...string) (string, string, *httpmsg.Response) {
+	seen := make(map[string]bool)
+	for _, name := range names {
+		for _, address := range uploadRetrievalPaths(t, form, name) {
+			if seen[address] {
+				continue
+			}
+			seen[address] = true
+			fetched, err := fetchPath(ctx, c, t, address)
+			if err != nil || fetched == nil || fetched.Status != 200 {
+				continue
+			}
+			if bytes.Contains(fetched.Body, uploadContentMarker) {
+				return name, address, fetched
+			}
+		}
+	}
+	return "", "", nil
 }
 
 // uploadRetrievalPaths are the addresses the written file might answer on.
@@ -1044,8 +1276,30 @@ func uploadRetrievalPaths(t *checks.Target, form *uploadForm, filename string) [
 	return out
 }
 
+// sendUpload rebuilds a multipart request with a new filename and sends it.
 func sendUpload(ctx context.Context, c *checks.Context, t *checks.Target, form *uploadForm, filename string) (*httpmsg.Request, *httpmsg.Response, error) {
 	body, contentType := form.build(filename)
+
+	mutated := t.Request.Clone()
+	mutated.Body = body
+	mutated.Header.Set("Content-Type", contentType)
+	mutated.Header.Set("Content-Length", fmt.Sprint(len(body)))
+	mutated.Origin = httpmsg.OriginReplay
+
+	response, err := c.Do(ctx, mutated)
+	if err != nil {
+		return nil, nil, err
+	}
+	return mutated, response, nil
+}
+
+// sendUploadRawPart is sendUpload with the name written into the part header as bytes.
+//
+// It exists for one probe: a name carrying a line break is a name no two parsers have to read
+// the same way, and that disagreement is the thing being tested. Everything else about the
+// request — the fields, the body, the framing, the length — is what sendUpload sends.
+func sendUploadRawPart(ctx context.Context, c *checks.Context, t *checks.Target, form *uploadForm, filename string) (*httpmsg.Request, *httpmsg.Response, error) {
+	body, contentType := form.buildRawPart(filename)
 
 	mutated := t.Request.Clone()
 	mutated.Body = body

@@ -67,6 +67,7 @@ func init() {
 	checks.Register(hostHeader{})
 	checks.Register(unsafeUpload{})
 	checks.Register(deserialization{})
+	checks.Register(shiroRememberMe{})
 	checks.Register(secondOrder{})
 	checks.Register(methodOverride{})
 	checks.Register(requestSmuggling{})
@@ -477,69 +478,128 @@ func (sqliBoolean) Run(ctx context.Context, c *checks.Context, t *checks.Target)
 		prefix = "1"
 	}
 
-	families := make([]booleanFamily, 0, len(booleanFamilies)+len(booleanMutatedFamilies()))
-	families = append(families, booleanFamilies...)
-	families = append(families, booleanMutatedFamilies()...)
+	// baseUnder returns the baseline fingerprinted the way a branch is: with the
+	// branch's own restore list. Applying the restore to one side of a comparison
+	// only is what turns page text the application wrote for its own reasons into
+	// a difference — see echoRestore.
+	baseUnder := func(value string) *diff.Fingerprint {
+		return c.Fingerprint(t.Response, echoRestore(value, t.Param.Value)...)
+	}
 
-	for _, family := range families {
-		// baseUnder returns the baseline fingerprinted the way a branch is: with the
-		// branch's own restore list. Applying the restore to one side of a comparison
-		// only is what turns page text the application wrote for its own reasons into
-		// a difference — see echoRestore.
-		baseUnder := func(value string) *diff.Fingerprint {
-			return c.Fingerprint(t.Response, echoRestore(value, t.Param.Value)...)
-		}
-
-		probe := func(suffix string) (booleanBranch, *httpmsg.Request, bool) {
-			value := prefix + suffix
-			if family.encoded {
-				// The values are already in transport form, so the parameter's own
-				// value has to be put into that form too, and the whole thing is
-				// sent verbatim.
-				value = url.QueryEscape(prefix) + suffix
-				request, response, err := c.InjectEncoded(ctx, t, value, checks.EncodeNone)
-				if err != nil || request == nil || response == nil {
-					return booleanBranch{}, nil, false
-				}
-				if response.Status >= 400 {
-					return booleanBranch{}, nil, false
-				}
-				fp := c.Fingerprint(response, echoRestore(value, t.Param.Value)...)
-				return booleanBranch{value: value, response: response, fp: fp}, request, true
-			}
-			request, response, err := c.Inject(ctx, t, value)
+	probe := func(family booleanFamily, suffix string) (booleanBranch, *httpmsg.Request, bool) {
+		value := prefix + suffix
+		if family.encoded {
+			// The values are already in transport form, so the parameter's own
+			// value has to be put into that form too, and the whole thing is
+			// sent verbatim.
+			value = url.QueryEscape(prefix) + suffix
+			request, response, err := c.InjectEncoded(ctx, t, value, checks.EncodeNone)
 			if err != nil || request == nil || response == nil {
 				return booleanBranch{}, nil, false
 			}
-			// A branch that failed is not a branch that was answered. A payload
-			// pasted into a template or a regular expression tends to make the
-			// page fail rather than change, and a failure differs from the
-			// baseline on every wording; a database answering a condition
-			// answers it normally.
 			if response.Status >= 400 {
 				return booleanBranch{}, nil, false
 			}
-			// The submitted value is restored to the parameter's original form
-			// before fingerprinting, because a page that prints its input back
-			// into a form would otherwise differ from the baseline by exactly
-			// the payload text — a difference that says nothing about the query.
 			fp := c.Fingerprint(response, echoRestore(value, t.Param.Value)...)
 			return booleanBranch{value: value, response: response, fp: fp}, request, true
 		}
+		request, response, err := c.Inject(ctx, t, value)
+		if err != nil || request == nil || response == nil {
+			return booleanBranch{}, nil, false
+		}
+		// A branch that failed is not a branch that was answered. A payload
+		// pasted into a template or a regular expression tends to make the
+		// page fail rather than change, and a failure differs from the
+		// baseline on every wording; a database answering a condition
+		// answers it normally.
+		if response.Status >= 400 {
+			return booleanBranch{}, nil, false
+		}
+		// The submitted value is restored to the parameter's original form
+		// before fingerprinting, because a page that prints its input back
+		// into a form would otherwise differ from the baseline by exactly
+		// the payload text — a difference that says nothing about the query.
+		fp := c.Fingerprint(response, echoRestore(value, t.Param.Value)...)
+		return booleanBranch{value: value, response: response, fp: fp}, request, true
+	}
 
-		trueOne, _, ok := probe(family.trueValues[0])
+	if verdict, found := walkBooleanFamilies(allBooleanFamilies(), baseUnder, probe); found {
+		return []*finding.Finding{booleanFinding(c, t, verdict, verdict.falseOne.value, "")}
+	}
+
+	// Nothing came back through the parameter. A header the application records and the segment
+	// it addresses a route by are values the caller writes just as freely, and a query built from
+	// either is unreachable from here.
+	if f := blindBooleanFinding(ctx, c, t); f != nil {
+		return []*finding.Finding{f}
+	}
+	return nil
+}
+
+// booleanProbe sends one suffix of a condition into the place under test and returns the branch
+// it produced, along with the request that carried it. It is the only thing that differs between
+// a parameter, a header and a path segment, and it is why one walk serves all three.
+type booleanProbe func(family booleanFamily, suffix string) (booleanBranch, *httpmsg.Request, bool)
+
+// booleanVerdict is a family that survived the walk: two equivalent true conditions that agreed
+// with each other, two equivalent false conditions that agreed with each other, and a difference
+// between the two groups.
+type booleanVerdict struct {
+	trueOne, trueTwo   booleanBranch
+	falseOne, falseTwo booleanBranch
+	// request is the request that carried the false condition. It is the one the evidence
+	// replays, because the false branch dying is the signal.
+	request *httpmsg.Request
+	// simTrue, simFalse and simBetween are the similarity scores the evidence quotes: the true
+	// branch against the baseline, the false branch against the baseline, and the two branches
+	// against each other.
+	simTrue, simFalse, simBetween float64
+}
+
+// allBooleanFamilies returns the confirmation pairs in the order they are sent: the plain
+// families first, so an unprotected target is answered by them, then the mutated spellings for
+// the target that has learned the literal ones.
+func allBooleanFamilies() []booleanFamily {
+	families := make([]booleanFamily, 0, len(booleanFamilies)+len(booleanMutatedFamilies()))
+	families = append(families, booleanFamilies...)
+	families = append(families, booleanMutatedFamilies()...)
+	return families
+}
+
+// walkBooleanFamilies runs the family walk at one place and returns the first family that
+// survives it.
+//
+// The walk is the whole judgement, and it is the same for every place a value can enter a query
+// from. A family passes only if its two true conditions answer identically, its two false
+// conditions answer identically, the two groups answer differently, and — for a family whose
+// true branch is expected to narrow the result back to what the original query returned — that
+// branch reproduces the baseline under its own restore list.
+//
+// The first condition of each group is sent before the second, because a family whose true and
+// false branches answer identically cannot pass however the rest of it is spelled. That is what
+// makes the walk affordable where it is asked more than once — a parameter, five headers, a path
+// — without relaxing anything: the requests a failing family does not send are ones that could
+// not have changed the answer.
+func walkBooleanFamilies(families []booleanFamily, baseUnder func(string) *diff.Fingerprint,
+	probe booleanProbe) (booleanVerdict, bool) {
+	for _, family := range families {
+		trueOne, _, ok := probe(family, family.trueValues[0])
 		if !ok {
 			continue
 		}
-		trueTwo, _, ok := probe(family.trueValues[1])
+		falseOne, falseReq, ok := probe(family, family.falseValues[0])
 		if !ok {
 			continue
 		}
-		falseOne, falseReq, ok := probe(family.falseValues[0])
+		// Different truth value, different page.
+		if trueOne.fp.NormHash == falseOne.fp.NormHash {
+			continue
+		}
+		trueTwo, _, ok := probe(family, family.trueValues[1])
 		if !ok {
 			continue
 		}
-		falseTwo, _, ok := probe(family.falseValues[1])
+		falseTwo, _, ok := probe(family, family.falseValues[1])
 		if !ok {
 			continue
 		}
@@ -554,10 +614,6 @@ func (sqliBoolean) Run(ctx context.Context, c *checks.Context, t *checks.Target)
 		if falseOne.fp.NormHash != falseTwo.fp.NormHash {
 			continue
 		}
-		// Different truth value, different page.
-		if trueOne.fp.NormHash == falseOne.fp.NormHash {
-			continue
-		}
 		// An AND family also has to leave the original result intact in its true
 		// branch — otherwise the change could be the query breaking rather than
 		// the condition being honoured.
@@ -565,32 +621,49 @@ func (sqliBoolean) Run(ctx context.Context, c *checks.Context, t *checks.Target)
 			continue
 		}
 
-		simTrue := diff.CompareFingerprints(baseUnder(trueOne.value), trueOne.fp).Score
-		simFalse := diff.CompareFingerprints(baseUnder(falseOne.value), falseOne.fp).Score
-		simBetween := diff.CompareFingerprints(trueOne.fp, falseOne.fp).Score
-
-		f := checks.NewFinding(sqliBoolean{}, t,
-			i18n.KeyCheckSQLiBoolTitle, i18n.KeyCheckSQLiBoolDesc, i18n.KeyCheckSQLiBoolFix)
-		f.Severity = finding.SeverityHigh
-		f.Confidence = finding.ConfidenceFirm
-		f.Payload = falseOne.value
-		f.CWE = "CWE-89"
-		f.References = sqlReferences
-		f.Evidence.Request = falseReq.Raw()
-		f.Evidence.Response = truncate(falseOne.response.Body, 8192)
-		f.Evidence.Baseline = truncate(t.Response.Body, 4096)
-		f.Evidence.Matches = []string{
-			"true condition: " + trueOne.value,
-			"false condition: " + falseOne.value,
-			"an equivalent true condition (" + trueTwo.value + ") and an equivalent false one (" +
-				falseTwo.value + ") each reproduced its group, so the difference tracks the condition " +
-				"rather than the payload",
-		}
-		f.Evidence.Diff = c.Bundle.T(i18n.KeyEvidenceBoolean,
-			round3(simTrue), round3(simFalse), round3(simBetween))
-		return []*finding.Finding{f}
+		return booleanVerdict{
+			trueOne:    trueOne,
+			trueTwo:    trueTwo,
+			falseOne:   falseOne,
+			falseTwo:   falseTwo,
+			request:    falseReq,
+			simTrue:    diff.CompareFingerprints(baseUnder(trueOne.value), trueOne.fp).Score,
+			simFalse:   diff.CompareFingerprints(baseUnder(falseOne.value), falseOne.fp).Score,
+			simBetween: diff.CompareFingerprints(trueOne.fp, falseOne.fp).Score,
+		}, true
 	}
-	return nil
+	return booleanVerdict{}, false
+}
+
+// booleanFinding renders a family that survived the walk.
+//
+// note, when set, says where the payload was written when it was written somewhere other than the
+// parameter. It is empty for the parameter, whose evidence needs no such line.
+func booleanFinding(c *checks.Context, t *checks.Target, verdict booleanVerdict,
+	payload, note string) *finding.Finding {
+	f := checks.NewFinding(sqliBoolean{}, t,
+		i18n.KeyCheckSQLiBoolTitle, i18n.KeyCheckSQLiBoolDesc, i18n.KeyCheckSQLiBoolFix)
+	f.Severity = finding.SeverityHigh
+	f.Confidence = finding.ConfidenceFirm
+	f.Payload = payload
+	f.CWE = "CWE-89"
+	f.References = sqlReferences
+	f.Evidence.Request = verdict.request.Raw()
+	f.Evidence.Response = truncate(verdict.falseOne.response.Body, 8192)
+	f.Evidence.Baseline = truncate(t.Response.Body, 4096)
+	f.Evidence.Matches = []string{
+		"true condition: " + verdict.trueOne.value,
+		"false condition: " + verdict.falseOne.value,
+		"an equivalent true condition (" + verdict.trueTwo.value + ") and an equivalent false one (" +
+			verdict.falseTwo.value + ") each reproduced its group, so the difference tracks the condition " +
+			"rather than the payload",
+	}
+	if note != "" {
+		f.Evidence.Matches = append(f.Evidence.Matches, note)
+	}
+	f.Evidence.Diff = c.Bundle.T(i18n.KeyEvidenceBoolean,
+		round3(verdict.simTrue), round3(verdict.simFalse), round3(verdict.simBetween))
+	return f
 }
 
 // sqliTimingSuffixes are delay instructions; sqliTimePayloadsFor prefixes them
@@ -778,6 +851,13 @@ func (sqliTime) Run(ctx context.Context, c *checks.Context, t *checks.Target) []
 				len(injected.Samples), ms(verdict.Injected.Median), ms(baseline.Median),
 				ms(verdict.Injected.IQR), variantNote(c, attempt)),
 		}
+		return []*finding.Finding{f}
+	}
+
+	// Nothing paused through the parameter. A query built from a header the application records,
+	// or from the segment it addresses a route by, is the same mistake in a place no parameter
+	// reaches — and the pause is measurable there in exactly the same way.
+	if f := blindTimingFinding(ctx, c, t, blindDelaySpellings); f != nil {
 		return []*finding.Finding{f}
 	}
 	return nil

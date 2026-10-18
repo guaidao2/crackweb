@@ -154,6 +154,13 @@ func (jwt) Run(ctx context.Context, c *checks.Context, t *checks.Target) []*find
 	if f := jwtKnownSecret(ctx, c, t, field, original, parts, header); f != nil {
 		return []*finding.Finding{f}
 	}
+	// A verifier that refuses a token and then answers the refusal with the key it refused it
+	// under — see jwtLeakedSigningKey. Placed after the forgeries above because it is the answer
+	// to a different question: not "is the signature checked" but "does the check keep its key
+	// to itself", and that one still matters on a service whose verifier is otherwise sound.
+	if f := jwtLeakedSigningKey(ctx, c, t, field, original, parts, header); f != nil {
+		return []*finding.Finding{f}
+	}
 	// Last, because it needs an interaction server and proves a different thing: the
 	// verifier follows an address the token supplies.
 	if f := jwtKeyURL(ctx, c, t, field, original, parts, header); f != nil {
@@ -244,6 +251,381 @@ func jwtKnownSecret(ctx context.Context, c *checks.Context, t *checks.Target, fi
 		return f
 	}
 	return nil
+}
+
+// jwtLeakedKeyMinLength is the shortest value treated as key material. Below it a word from the
+// message is a word: "none", "null", "true" and "key" all fit under it.
+const jwtLeakedKeyMinLength = 6
+
+// jwtLeakedKeyMaxLength bounds what one value is read as. A signing key longer than this is not a
+// key but a document, and a published document is the passive checks' finding.
+const jwtLeakedKeyMaxLength = 256
+
+// jwtLeakedKeyScanLimit bounds the part of a refusal that is searched. A stack trace runs to
+// megabytes and nothing about this finding lives past the first screen of it.
+const jwtLeakedKeyScanLimit = 64 * 1024
+
+// jwtLeakedKeyMaxCandidates bounds how many values from one refusal are tried as a key.
+const jwtLeakedKeyMaxCandidates = 400
+
+// jwtLeakedSigningKey reports a service that discloses the key its tokens are signed with in the
+// error it returns for a token it refuses.
+//
+// The exchange is the ordinary one: a token whose signature is wrong is sent, and what the
+// verifier says about it is read. Two kinds of material are reported, and a word from an error
+// message is neither of them:
+//
+//   - material that reproduces the signature of the token in hand. A string in a 401 whose keyed
+//     hash is the signature the service accepted is the key, whatever the sentence around it
+//     claims, and no page arrives at that by accident.
+//   - material the message names as the key its tokens are signed with — `"signing_key": "…"`
+//     and its spellings. Nothing verifies that value (a rotated key would not), so the finding
+//     repeats what the message said instead of asserting more.
+//
+// Three controls keep the noise out, and each of them removes a way this could be wrong rather
+// than a way it could fire:
+//
+//   - the response has to be a refusal. An answer the service would also have given the token it
+//     issued says nothing about this token, and a target that never looks at the credential is
+//     reported by the alg=none attempts above.
+//   - the material has to be new. What the accepted answer already printed is a page that
+//     publishes its key, and calling that a leak by the refusal would put the wrong sentence in
+//     the report. Both sides of the comparison get the same treatment.
+//   - the material must not be the request's own bytes. A page that quotes the token it was
+//     handed contains the marker without the service having said anything it should not have.
+//
+// Only a keyed-hash token is examined. Its key is a string a message can be *proved* to have
+// disclosed, because the signature is a function of it. An asymmetric key in a message would be
+// all message and no proof — a key identifier is not key material — and a published private key,
+// which is what such a leak actually looks like, is what the passive private-key check reports.
+func jwtLeakedSigningKey(ctx context.Context, c *checks.Context, t *checks.Target, field, original string, parts []string, header map[string]any) *finding.Finding {
+	if !local.SymmetricAlgorithm(headerAlgorithm(header)) {
+		return nil
+	}
+	token, err := local.Parse(original)
+	if err != nil || !token.Signed() {
+		return nil
+	}
+
+	// The token the verifier must refuse, altered in the bytes of its signature rather than in
+	// its text: see tamperSignature for why the text alone is not enough to make a forgery.
+	forged := parts[0] + "." + parts[1] + "." + tamperSignature(parts[2])
+	probe := t.Request.Clone()
+	probe.Header.Set(field, replaceToken(t.Request.Header.Get(field), original, forged))
+	response, err := c.Do(ctx, probe)
+	if err != nil || response == nil {
+		return nil
+	}
+	if jwtAccepted(response, t.Response) {
+		return nil
+	}
+
+	key, label, verified := jwtDisclosedKey(
+		string(truncate(response.Body, jwtLeakedKeyScanLimit)),
+		token,
+		t.Response.Body,
+		probe.Raw(),
+		original,
+	)
+	if key == "" {
+		return nil
+	}
+	// A label alone does not prove that the value is the key behind this token: a refusal can
+	// name a signing key without disclosing usable material. Only the verified path is reported.
+	if !verified {
+		return nil
+	}
+
+	f := checks.NewFinding(jwt{}, t,
+		i18n.KeyCheckJWTWeakSecretTitle, i18n.KeyCheckJWTWeakSecretDesc, i18n.KeyCheckJWTFix)
+	f.Param = field
+	f.Method = probe.Method
+	f.URL = probe.URLString()
+	// What a reader replays is the token that earned the refusal: the key comes back with it.
+	f.Payload = forged
+	f.CWE = "CWE-209"
+	f.References = []string{
+		"https://cwe.mitre.org/data/definitions/209.html",
+		"https://portswigger.net/web-security/jwt",
+	}
+	// The key belongs to the deployment, not to the endpoint: a crawl that walks twenty pages
+	// would otherwise report the same disclosure twenty times.
+	f.DedupHostOnly = true
+	f.Evidence.Request = probe.Raw()
+	f.Evidence.Response = truncate(response.Body, 8192)
+	f.Evidence.Baseline = truncate(t.Response.Body, 4096)
+
+	if verified {
+		// The token the service accepted is signed with this key, and the refusal handed it out:
+		// every identity the application recognises is forgeable by whoever read that error.
+		f.Severity = finding.SeverityCritical
+		f.Confidence = finding.ConfidenceCertain
+		f.Evidence.Diff = c.Bundle.T(i18n.KeyEvidenceJWTWeakSecretSameKey, key)
+		f.Evidence.Matches = []string{
+			key,
+			"the value was returned in the refusal to a token whose signature was altered, and it " +
+				"reproduces the signature of the token the service accepted",
+		}
+		return f
+	}
+
+	// Nothing proves this value is the key behind this token, so the finding says what the
+	// message said and no more than that.
+	f.Severity = finding.SeverityHigh
+	f.Confidence = finding.ConfidenceFirm
+	f.Evidence.Diff = "the refusal named " + label + " with the value " + key +
+		"; a signing key printed in an error is a key the service can no longer keep"
+	f.Evidence.Matches = []string{label, key}
+	return f
+}
+
+// jwtDisclosedKey returns the key a refusal disclosed: the value, the name the message used for
+// it when there was one, and whether the value was proved to be the key behind the token.
+//
+// The decisive form is tried over every value-shaped run of the message before the labelled form
+// is considered, so a service that both prints its key and names it is reported as proved rather
+// than as claimed.
+func jwtDisclosedKey(body string, token *local.Token, baseline, request []byte, original string) (key, label string, verified bool) {
+	// disclosed reports whether a value is the refusal's own disclosure rather than something the
+	// exchange already contained.
+	disclosed := func(value string) bool {
+		if len(value) < jwtLeakedKeyMinLength || len(value) > jwtLeakedKeyMaxLength {
+			return false
+		}
+		// The request's own bytes and the token's own bytes are echo, not disclosure.
+		if bytes.Contains(request, []byte(value)) || strings.Contains(original, value) {
+			return false
+		}
+		// What the accepted answer already printed is a page that publishes the key.
+		return !bytes.Contains(baseline, []byte(value))
+	}
+
+	for _, run := range jwtKeyRuns(body, jwtLeakedKeyMaxCandidates) {
+		for _, candidate := range jwtKeySpellings(run) {
+			if !disclosed(candidate) {
+				continue
+			}
+			if token.VerifyHMAC([]byte(candidate)) {
+				return candidate, "", true
+			}
+		}
+	}
+
+	for _, mention := range jwtKeyMentions(body) {
+		if !disclosed(mention.value) || jwtNotKeyMaterial[jwtNormaliseLabel(mention.value)] {
+			continue
+		}
+		if token.VerifyHMAC([]byte(mention.value)) {
+			return mention.value, mention.label, true
+		}
+		if key == "" {
+			key, label = mention.value, mention.label
+		}
+	}
+	return key, label, false
+}
+
+// jwtKeyRuns returns the runs of characters a printed key can consist of.
+//
+// The separators are the punctuation a message puts around a value — quotes, a colon, commas,
+// brackets, whitespace — so `{"signing_key":"abc123"}` and `signing_key=abc123` both yield the
+// value on its own, and neither yields the field name glued to it. `=` splits, and both of what
+// it separates is tried: a base64 value that ends in padding loses it, and an HMAC comparison
+// decides whether the spelling that was lost was the one the verifier holds.
+func jwtKeyRuns(text string, limit int) []string {
+	out := make([]string, 0, 16)
+	start := -1
+	flush := func(end int) {
+		if start < 0 {
+			return
+		}
+		if run := text[start:end]; run != "" && len(out) < limit {
+			out = append(out, run)
+		}
+		start = -1
+	}
+	for index := 0; index < len(text); index++ {
+		if jwtKeyByte(text[index]) {
+			if start < 0 {
+				start = index
+			}
+			continue
+		}
+		flush(index)
+		if len(out) >= limit {
+			return out
+		}
+	}
+	flush(len(text))
+	return out
+}
+
+// jwtKeySpellings returns a run as it stands and with the punctuation a sentence wraps it in
+// taken off: a trailing full stop is punctuation, not part of the key.
+func jwtKeySpellings(run string) []string {
+	trimmed := strings.Trim(run, ".-~_")
+	if trimmed == "" || trimmed == run {
+		return []string{run}
+	}
+	return []string{run, trimmed}
+}
+
+// jwtKeyByte reports whether a byte can appear in a key as a message prints it.
+func jwtKeyByte(b byte) bool {
+	switch {
+	case b >= 'a' && b <= 'z', b >= 'A' && b <= 'Z', b >= '0' && b <= '9':
+		return true
+	}
+	switch b {
+	case '+', '_', '-', '.', '~', '/':
+		return true
+	}
+	return false
+}
+
+// jwtKeyMention is a value a message named as the key its tokens are signed with.
+type jwtKeyMention struct {
+	// label is the spelling the message used, kept for the evidence.
+	label string
+	// value is what the message put after it.
+	value string
+}
+
+// jwtSigningKeyLabels are the names a message uses when it says which key a token is signed
+// with. Every one of them names a signing key; a bare "key" or "secret" does not, and those are
+// exactly the words an error message reaches for when it is talking about something else.
+var jwtSigningKeyLabels = map[string]bool{
+	"signingkey": true, "signingsecret": true, "signkey": true, "tokensigningkey": true,
+	"jwtkey": true, "jwtsecret": true, "hmackey": true, "hmacsecret": true,
+	"verifykey": true, "verificationkey": true, "verifiersecret": true,
+}
+
+// jwtNotKeyMaterial are the words a message puts where a key would go when the key is what is
+// missing. Reading one as a disclosed key turns "signing_key: required" into a finding.
+var jwtNotKeyMaterial = map[string]bool{
+	"required": true, "missing": true, "invalid": true, "unknown": true, "absent": true,
+	"none": true, "null": true, "unset": true, "notset": true, "notfound": true,
+	"empty": true, "undefined": true, "default": true, "disabled": true, "enabled": true,
+	"expired": true, "configured": true, "unavailable": true, "true": true, "false": true,
+}
+
+// jwtKeyMentions returns the values a message named as the signing key, each with the label that
+// named it.
+func jwtKeyMentions(text string) []jwtKeyMention {
+	var out []jwtKeyMention
+	for index := 0; index < len(text); index++ {
+		if text[index] != ':' && text[index] != '=' {
+			continue
+		}
+		label, ok := jwtLabelBefore(text, index)
+		if !ok {
+			continue
+		}
+		value, ok := jwtValueAfter(text, index+1)
+		if !ok {
+			continue
+		}
+		out = append(out, jwtKeyMention{label: label, value: value})
+	}
+	return out
+}
+
+// jwtLabelBefore returns the label a separator ends, when it names a signing key. Prose spells
+// the same name in two words — "signing key: …", "jwt secret: …" — so the word before the
+// separator is joined to the one before it when that pair is a spelling the map carries. Neither
+// word on its own has to be one, which is what keeps "the key: …" out.
+func jwtLabelBefore(text string, end int) (string, bool) {
+	word, start := jwtWordBefore(text, end)
+	if word == "" {
+		return "", false
+	}
+	if jwtSigningKeyLabels[jwtNormaliseLabel(word)] {
+		return word, true
+	}
+	previous, _ := jwtWordBefore(text, start)
+	if previous == "" {
+		return "", false
+	}
+	if jwtSigningKeyLabels[jwtNormaliseLabel(previous+word)] {
+		return previous + " " + word, true
+	}
+	return "", false
+}
+
+// jwtWordBefore returns the word that ends at end, and the offset to continue searching from.
+//
+// The whitespace and quotes between a label and its separator are punctuation: `"signing_key":`
+// and `signing key :` both end with the label itself.
+func jwtWordBefore(text string, end int) (string, int) {
+	index := end
+	for index > 0 && (jwtLabelSpace(text[index-1]) || jwtLabelQuote(text[index-1])) {
+		index--
+	}
+	start := index
+	for start > 0 && jwtLabelByte(text[start-1]) {
+		start--
+	}
+	return text[start:index], start
+}
+
+// jwtValueAfter returns the value that follows a separator: a quoted string when the message
+// quotes it, and otherwise the run of key characters it starts with.
+func jwtValueAfter(text string, start int) (string, bool) {
+	for start < len(text) && jwtLabelSpace(text[start]) {
+		start++
+	}
+	if start >= len(text) {
+		return "", false
+	}
+	if quote := text[start]; jwtLabelQuote(quote) {
+		end := strings.IndexByte(text[start+1:], quote)
+		if end < 0 || end > jwtLeakedKeyMaxLength {
+			return "", false
+		}
+		return text[start+1 : start+1+end], true
+	}
+	end := start
+	for end < len(text) && jwtKeyByte(text[end]) {
+		end++
+	}
+	if end == start {
+		return "", false
+	}
+	return text[start:end], true
+}
+
+// jwtNormaliseLabel folds the spellings of a label into one: `signing_key`, `signing-key`,
+// `signingKey` and `signing key` all name the same thing.
+func jwtNormaliseLabel(label string) string {
+	lowered := strings.ToLower(label)
+	var folded strings.Builder
+	for index := 0; index < len(lowered); index++ {
+		switch lowered[index] {
+		case '_', '-', ' ', '.', '\t':
+			continue
+		}
+		folded.WriteByte(lowered[index])
+	}
+	return folded.String()
+}
+
+// jwtLabelByte reports whether a byte can be part of a label.
+func jwtLabelByte(b byte) bool {
+	switch {
+	case b >= 'a' && b <= 'z', b >= 'A' && b <= 'Z', b >= '0' && b <= '9':
+		return true
+	}
+	return b == '_' || b == '-' || b == '.'
+}
+
+// jwtLabelSpace reports whether a byte is whitespace a message separates a label with.
+func jwtLabelSpace(b byte) bool {
+	return b == ' ' || b == '\t' || b == '\n' || b == '\r'
+}
+
+// jwtLabelQuote reports whether a byte quotes a value.
+func jwtLabelQuote(b byte) bool {
+	return b == '"' || b == '\'' || b == '`'
 }
 
 // headerAlgorithm reads the "alg" a header declares.

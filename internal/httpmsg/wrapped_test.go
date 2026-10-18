@@ -105,8 +105,9 @@ func TestWrappedNestedPathIsAddressable(t *testing.T) {
 
 func TestOrdinaryValuesAreNotUnwrapped(t *testing.T) {
 	// A value that merely looks encoded is not a document, and treating it as one would
-	// add parameters that do not exist.
-	for _, value := range []string{"hello", "12345", "aGVsbG8=", "{not json", "1,2,3"} {
+	// add parameters that do not exist. Base64 text is a different case: it is addressed
+	// by TestBase64ScalarParameterIsAddressable, not as a JSON document.
+	for _, value := range []string{"hello", "12345", "{not json", "1,2,3"} {
 		req := wrappedRequest(t, value)
 		if got := req.Params(); len(got) != 1 {
 			t.Errorf("value %q produced %d parameters, want 1", value, len(got))

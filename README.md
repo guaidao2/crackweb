@@ -228,6 +228,7 @@ channel that can never deliver.
 | `nosqli` | High |
 | `xxe` | High |
 | `deserialization` | High |
+| `shiro-default-key` | Critical |
 | `second-order-injection` | High |
 | `jwt` | Critical |
 | `upload` | Medium |
@@ -390,6 +391,7 @@ from a fuzzer:
 | **Second-order injection** | A payload is written through one request and the *already-observed* pages are replayed to see whether reading it back broke something. Compared against what those pages returned **before** the write, so the evidence is the change the write caused. |
 | **Blind testing by callback** | A blind SSRF, command injection or XXE leaves nothing in the response. Each attempt plants a unique callback address and the proof arrives later, on a separate listener. |
 | **Encoded parameter documents** | A parameter whose value is a JSON document — base64-wrapped or not — is opened, and its fields are tested one by one. The envelope is rebuilt around every mutation, so a payload inside the document still reaches the application as valid input instead of breaking the parameter it arrived in. |
+| **Base64 scalar values** | A parameter whose value is base64 text — not a JSON document — is decoded and tested as the text the application sees. Each mutation is re-encoded in the same alphabet and padding. A value that is not canonical base64, or whose bytes are not text, is left alone. |
 
 ## Authenticated scanning
 

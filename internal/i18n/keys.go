@@ -471,6 +471,11 @@ const (
 	KeyCheckDeserialDesc  Key = "check.deserialization.description"
 	KeyCheckDeserialFix   Key = "check.deserialization.remediation"
 
+	// Active check: Apache Shiro rememberMe cookie under a published default key.
+	KeyCheckShiroTitle Key = "check.shiro-default-key.title"
+	KeyCheckShiroDesc  Key = "check.shiro-default-key.description"
+	KeyCheckShiroFix   Key = "check.shiro-default-key.remediation"
+
 	// Evidence sentences shared by several active checks.
 	KeyEvidenceBoolean    Key = "evidence.boolean-comparison"
 	KeyEvidenceTiming     Key = "evidence.timing"

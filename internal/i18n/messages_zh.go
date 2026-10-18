@@ -663,6 +663,14 @@ var chinese = map[Key]string{
 	KeyCheckDeserialFix: "不要接受客户端传来的序列化对象；" +
 		"改用带显式 schema 的数据格式（如 JSON）；" +
 		"若确实无法避免序列化格式，请把可反序列化的类型限制在白名单内。",
+	KeyCheckShiroTitle: "Apache Shiro 的 rememberMe Cookie 使用了公开的默认密钥",
+	KeyCheckShiroDesc: "本站发出的 rememberMe Cookie 可以用 Apache Shiro 作为示例配置公开过的 " +
+		"AES 密钥解开，也就是说任何读到该密钥的人都能加密同样的内容。Shiro 在判断调用者是谁之前 " +
+		"就会反序列化这个 Cookie 里的一切，因此能用该密钥加密的人就能把自己构造的序列化对象放进去 " +
+		"—— 让它变成远程代码执行的是 gadget 链，而不是密钥本身。",
+	KeyCheckShiroFix: "为每个部署单独生成加解密密钥，并且不要纳入版本控制；定期轮换，" +
+		"使旧密钥写下的 Cookie 全部失效。曾被公开过的密钥应视为没有密钥；" +
+		"同时升级 Shiro，以便限制 Cookie 允许反序列化的类。",
 	KeyEvidenceTimingStat: "%d 次采样中位数为 %s，基线为 %s（波动 %s）；%s",
 	KeyEvidenceHPP: "payload 作为同名参数的第二次出现发送，" +
 		"因此只读第一个取值的过滤器看不到它",

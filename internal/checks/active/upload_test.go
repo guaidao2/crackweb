@@ -258,6 +258,15 @@ func isDangerousUploadName(name string) bool {
 	if strings.Contains(name, "%00") || strings.ContainsRune(name, 0) {
 		return true
 	}
+	// Any other control character, and the name is one the layer that validates it and the
+	// layer that stores it may read differently — the shape CVE-2017-15715 is about. A
+	// hardened endpoint either refuses such a name outright or normalises it before matching,
+	// and this is the harness that has to do the same or it stops being a defence.
+	for _, r := range name {
+		if r < 0x20 || r == 0x7f {
+			return true
+		}
+	}
 	// Windows strips trailing dots and spaces before resolving a name, so
 	// "shell.php." and "shell.php " both end up as "shell.php".
 	normalised := strings.TrimRight(name, ". ")
