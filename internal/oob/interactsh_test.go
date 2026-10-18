@@ -27,8 +27,8 @@ import (
 // assumed.
 //
 // It also copies the deployment's one silent behaviour: a correlation id outside
-// the xid alphabet is accepted at registration and then credited with nothing.
-// The tests that used to pass either way are the ones this exists for.
+// the xid alphabet is accepted at registration and then credited with nothing. That is
+// what a test can hold the client to, and what the alphabet is checked for.
 type fakeInteractsh struct {
 	mu       sync.Mutex
 	corrID   string

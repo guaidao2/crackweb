@@ -308,11 +308,10 @@ func (i *Interactsh) register(ctx context.Context) error {
 // NewURL mints a callback address and the handle that identifies it.
 //
 // The name is the handle, a dot, and the deployment: `<correlation-id><random>.<server>`.
-// The correlation id has to lead it — the deployment matches an interaction to this
-// registration by that prefix, and a label that carries anything in front of the id is
-// accepted at registration and then never attributed, which is how this went unnoticed for
-// so long. Everything after the leading id is ours: the random tail is what keeps two
-// injections apart, and the caller's own name follows it for the reader.
+// The correlation id has to lead it: the deployment matches an interaction to a registration by
+// that prefix, and a label carrying anything in front of the id is accepted at registration and
+// never attributed to anything. Everything after the leading id belongs to the client — the random
+// tail keeps two injections apart, and the caller's own name follows it.
 func (i *Interactsh) NewURL(label string) (string, string) {
 	token := i.corrID + randomFrom(interactshNonceAlphabet, interactshNonceLength)
 	if extra := sanitiseLabel(label); extra != "" {
@@ -445,10 +444,9 @@ func (i *Interactsh) fetch(ctx context.Context) ([]checks.Interaction, error) {
 		}
 	}
 
-	// The halves that are not encrypted at all: extra and tlddata arrive as plain
-	// JSON, and they are not covered by the key that opens data. Reading only data
-	// is how a callback that did arrive goes unseen, which is the same failure this
-	// whole exchange had.
+	// The halves that are not encrypted at all: extra and tlddata arrive as plain JSON and are not
+	// covered by the key that opens data. Reading only data drops callbacks the deployment did
+	// record.
 	for _, entry := range polled.Extra {
 		if interaction, ok := plainInteraction(entry); ok {
 			out = append(out, interaction)

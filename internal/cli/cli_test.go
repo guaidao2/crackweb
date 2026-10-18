@@ -96,7 +96,7 @@ func TestPrintFindingCarriesTheRequestToReplay(t *testing.T) {
 		t.Errorf("the command is missing the payload it was sent with:\n%s", printed)
 	}
 	if strings.Contains(printed, "Payload: "+payload) {
-		t.Errorf("the payload line is no longer shortened:\n%s", printed)
+		t.Errorf("the payload line has to stay shortened to the screen:\n%s", printed)
 	}
 }
 
