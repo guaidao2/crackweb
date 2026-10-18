@@ -286,3 +286,84 @@ func TestRejectsNonProxyRequest(t *testing.T) {
 		t.Errorf("status = %d, want 400", resp.StatusCode)
 	}
 }
+
+// TestRelaysRedirectsInsteadOfFollowing: the proxy's job is to show the client the
+// 3xx it was sent. Following it here would hide the redirect from the browser and
+// make every Location-based check see the wrong response.
+func TestRelaysRedirectsInsteadOfFollowing(t *testing.T) {
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/landing", http.StatusFound)
+	}))
+	defer target.Close()
+
+	authority, _ := ca.Generate("test")
+	p := testProxy(t, Options{CA: authority})
+	client := proxyClient(t, p, authority)
+	client.CheckRedirect = func(*http.Request, []*http.Request) error {
+		return http.ErrUseLastResponse
+	}
+
+	resp, err := client.Get(target.URL + "/start")
+	if err != nil {
+		t.Fatalf("GET through proxy: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusFound {
+		t.Errorf("status = %d, want 302", resp.StatusCode)
+	}
+	if got := resp.Header.Get("Location"); got != "/landing" {
+		t.Errorf("Location = %q, want /landing", got)
+	}
+}
+
+// TestResponseHeaderTimeoutBoundsASilentOrigin: a server that accepts the connection
+// and then says nothing must not hold the proxy open forever.
+func TestResponseHeaderTimeoutBoundsASilentOrigin(t *testing.T) {
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(500 * time.Millisecond)
+		fmt.Fprint(w, "too late")
+	}))
+	defer target.Close()
+
+	authority, _ := ca.Generate("test")
+	p := testProxy(t, Options{CA: authority, Timeout: 100 * time.Millisecond})
+	client := proxyClient(t, p, authority)
+
+	resp, err := client.Get(target.URL + "/slow")
+	if err != nil {
+		t.Fatalf("GET through proxy: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadGateway {
+		t.Errorf("status = %d, want 502 for an unanswered origin", resp.StatusCode)
+	}
+}
+
+// TestSlowBodyIsNotCutOffByTheHeaderTimeout: the timeout bounds the wait for headers,
+// not the download. A large body on a slow link is still a successful request.
+func TestSlowBodyIsNotCutOffByTheHeaderTimeout(t *testing.T) {
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Length", "11")
+		w.WriteHeader(http.StatusOK)
+		if flusher, ok := w.(http.Flusher); ok {
+			flusher.Flush()
+		}
+		time.Sleep(300 * time.Millisecond)
+		fmt.Fprint(w, "slow body!!")
+	}))
+	defer target.Close()
+
+	authority, _ := ca.Generate("test")
+	p := testProxy(t, Options{CA: authority, Timeout: 100 * time.Millisecond})
+	client := proxyClient(t, p, authority)
+
+	resp, err := client.Get(target.URL + "/download")
+	if err != nil {
+		t.Fatalf("GET through proxy: %v", err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if string(body) != "slow body!!" {
+		t.Errorf("body = %q, want the body to arrive after the header deadline passed", body)
+	}
+}

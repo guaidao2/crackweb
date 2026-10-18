@@ -211,8 +211,9 @@ const maxReplayBody = 256 << 10
 // be reconstructed from the address it went to. Fetching that address as a GET misses the
 // endpoint entirely, which is how a JSON API the browser talked to all along ends up
 // untested. So the request is sent again exactly as it went out.
-func (c *Crawler) replayObserved(ctx context.Context, observed []observedRequest) int {
+func (c *Crawler) replayObserved(ctx context.Context, observed []observedRequest) (int, map[string]bool) {
 	replayed := 0
+	sent := map[string]bool{}
 	seen := map[string]bool{}
 
 	for _, item := range observed {
@@ -238,10 +239,12 @@ func (c *Crawler) replayObserved(ctx context.Context, observed []observedRequest
 		if item.ContentType != "" {
 			req.Header.Set("Content-Type", item.ContentType)
 		}
-		c.deliver(ctx, req)
+		if c.deliver(ctx, req) {
+			sent[item.Method+" "+item.URL] = true
+		}
 		replayed++
 	}
-	return replayed
+	return replayed, sent
 }
 
 // worthReplaying reports whether a request the browser made is one the HTTP engine would
@@ -306,10 +309,20 @@ func (c *Crawler) Run(ctx context.Context, seed string) error {
 		if err != nil {
 			c.opts.Logf("crawl: headless engine unavailable (%v); continuing with HTTP", err)
 		} else {
-			replayed := c.replayObserved(ctx, observed)
+			replayed, sent := c.replayObserved(ctx, observed)
 			c.opts.Logf("crawl: the browser reported %d request(s), replayed %d",
 				len(observed), replayed)
 			for _, item := range observed {
+				// A request that carried a body and was replayed is already covered
+				// with its own method and bytes; fetching the same address again as
+				// a GET tests a request the page never made, and on an endpoint whose
+				// GET has side effects it makes the crawl change state by accident.
+				// A request the replay did not send — a transport failure, a
+				// duplicate — still gets the GET fallback it had before, so nothing
+				// is lost from the crawl.
+				if !safeMethods[strings.ToUpper(item.Method)] && sent[item.Method+" "+item.URL] {
+					continue
+				}
 				seeds = append(seeds, queueItem{url: item.URL})
 			}
 		}
@@ -433,7 +446,13 @@ func (c *Crawler) fetchOne(ctx context.Context, item queueItem) fetchResult {
 		return result
 	}
 	req.Origin = httpmsg.OriginCrawler
+	// The crawl's own session goes on first, so the configured identity augments it
+	// rather than replacing it: a credential cookie must not stop the cookies the
+	// site handed out from being sent back.
 	c.applyCookies(req)
+	// The configured identity is applied to the message model here, once, before
+	// the checks share it. Sending no longer writes to the request.
+	c.opts.Client.ApplyCredentials(req)
 
 	resp, err := c.opts.Client.Do(ctx, req)
 	if err != nil {
@@ -600,7 +619,18 @@ func FormRequests(form Form, base *url.URL) []*httpmsg.Request {
 		req.Header.Set("Content-Length", fmt.Sprint(len(req.Body)))
 		return []*httpmsg.Request{req}
 	default:
-		req, err := httpmsg.NewRequest("GET", target+"?"+form.EncodeBody())
+		address := target
+		query := form.EncodeBody()
+		if query != "" {
+			// The action may already carry a query string, and appending another
+			// "?" would fold the form fields into the value of the last parameter.
+			if strings.Contains(address, "?") {
+				address += "&" + query
+			} else {
+				address += "?" + query
+			}
+		}
+		req, err := httpmsg.NewRequest("GET", address)
 		if err != nil {
 			return nil
 		}
@@ -612,11 +642,12 @@ func FormRequests(form Form, base *url.URL) []*httpmsg.Request {
 // deliver sends a synthesised request and passes the exchange on. The crawl's session is
 // applied here, so a request a form produced travels with the same cookies as the page
 // the form was found on.
-func (c *Crawler) deliver(ctx context.Context, req *httpmsg.Request) {
+func (c *Crawler) deliver(ctx context.Context, req *httpmsg.Request) bool {
 	c.applyCookies(req)
+	c.opts.Client.ApplyCredentials(req)
 	resp, err := c.opts.Client.Do(ctx, req)
 	if err != nil {
-		return
+		return false
 	}
 	c.rememberCookies(req, resp)
 	c.mu.Lock()
@@ -625,6 +656,7 @@ func (c *Crawler) deliver(ctx context.Context, req *httpmsg.Request) {
 	if c.opts.OnExchange != nil {
 		c.opts.OnExchange(req, resp)
 	}
+	return true
 }
 
 // accept decides whether a URL is worth following, and returns its

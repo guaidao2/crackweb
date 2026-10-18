@@ -1,10 +1,12 @@
 package local
 
 import (
+	"bytes"
 	"crypto/md5"
 	"crypto/sha1"
 	"crypto/sha256"
 	"crypto/sha512"
+	"encoding/base64"
 	"encoding/hex"
 	"fmt"
 	"hash"
@@ -89,8 +91,10 @@ func Identify(value string) []HashKind {
 			return out
 		}
 	}
-	// Base64 is the LDAP and pass-the-hash spelling.
-	if isBase64(value) && len(value)%4 == 0 {
+	// Base64 is the LDAP and pass-the-hash spelling. Length and character mix are
+	// both required: "password" is eight characters of the base64 alphabet, and a
+	// length check alone used to report it as a digest.
+	if looksLikeBase64Digest(value) {
 		add(HashKind{Name: "base64 digest", Note: "28 or 32 characters usually mean a SHA-1 or MD5 family hash in base64"})
 	}
 	return out
@@ -131,6 +135,32 @@ func isBase64(value string) bool {
 	return true
 }
 
+// looksLikeBase64Digest reports whether a value is long and mixed enough to be a digest
+// written in base64, rather than an ordinary word that happens to use the same alphabet.
+func looksLikeBase64Digest(value string) bool {
+	if len(value) < 24 || len(value)%4 != 0 || !isBase64(value) {
+		return false
+	}
+	var lower, upper, digit bool
+	for _, r := range value {
+		switch {
+		case r >= 'a' && r <= 'z':
+			lower = true
+		case r >= 'A' && r <= 'Z':
+			upper = true
+		case r >= '0' && r <= '9':
+			digit = true
+		}
+	}
+	kinds := 0
+	for _, present := range []bool{lower, upper, digit} {
+		if present {
+			kinds++
+		}
+	}
+	return kinds >= 2
+}
+
 // CrackResult is a plaintext whose digest equals the value.
 type HashCrackResult struct {
 	// Plaintext is the word that produced the digest.
@@ -162,12 +192,27 @@ var CommonPasswords = []string{
 // The work is a digest per candidate, locally. Nothing is sent and nothing is looked up: a
 // digest is a function, and a word that reproduces it is proof.
 func CrackHash(value string, kinds []HashKind, candidates []string) (*HashCrackResult, bool) {
-	value = strings.ToLower(strings.TrimSpace(value))
-	// The MySQL spelling wraps the digest in an asterisk; strip it for comparison.
-	inner := strings.TrimPrefix(value, "*")
+	original := strings.TrimSpace(value)
+	// The stored spelling is compared case-insensitively, but decoding a base64 value
+	// needs its original case; the two forms are therefore kept apart.
+	inner := strings.TrimPrefix(strings.ToLower(original), "*")
 
 	for _, kind := range kinds {
 		if !kind.Crackable || kind.new == nil {
+			continue
+		}
+		// An LDAP {SHA} value is the SHA-1 digest in base64, not a hex digest.
+		if kind.Name == "SHA-1" && strings.HasPrefix(strings.ToUpper(original), "{SHA}") {
+			want, err := base64.StdEncoding.DecodeString(original[len("{SHA}"):])
+			if err != nil {
+				continue
+			}
+			for index, candidate := range candidates {
+				sum := sha1.Sum([]byte(candidate))
+				if bytes.Equal(sum[:], want) {
+					return &HashCrackResult{Plaintext: candidate, Kind: kind.Name, Tried: index + 1}, true
+				}
+			}
 			continue
 		}
 		for index, candidate := range candidates {
@@ -178,7 +223,7 @@ func CrackHash(value string, kinds []HashKind, candidates []string) (*HashCrackR
 				// The stored value is SHA-1(SHA-1(word)), upper case, behind an asterisk.
 				sum = strings.ToUpper(hex.EncodeToString(sha1Sum(mustHex(sum))))
 			}
-			if sum == inner || strings.EqualFold(sum, inner) {
+			if strings.EqualFold(sum, inner) {
 				return &HashCrackResult{Plaintext: candidate, Kind: kind.Name, Tried: index + 1}, true
 			}
 		}

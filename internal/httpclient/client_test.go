@@ -497,6 +497,9 @@ func TestCredentialsReachTheRequestTheChecksRead(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewRequest: %v", err)
 	}
+	// The identity is written to the message model when the request enters the tool,
+	// once. Sending no longer writes to the object the checks share.
+	client.ApplyCredentials(req)
 	if _, err := client.Do(context.Background(), req); err != nil {
 		t.Fatalf("Do: %v", err)
 	}

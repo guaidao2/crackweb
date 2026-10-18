@@ -210,6 +210,9 @@ func buildRequest(method, template string, operation rawOperation, base *url.URL
 	target.RawPath = ""
 
 	query := url.Values{}
+	form := url.Values{}
+	formFields := false
+	headers := map[string]string{}
 	contentType := ""
 	var body []byte
 
@@ -228,7 +231,21 @@ func buildRequest(method, template string, operation rawOperation, base *url.URL
 				contentType = "application/json"
 			}
 		case "formdata":
-			query.Set(parameter.Name, sampleValue(parameter))
+			// Swagger 2.0 puts form fields in this location. They belong in a
+			// form-encoded body, not in the query: an endpoint that reads
+			// r.FormValue never sees a query string, so putting them there
+			// would reach the handler with every field empty.
+			form.Set(parameter.Name, sampleValue(parameter))
+			formFields = true
+		case "header":
+			// Header parameters are names the operation requires; without them the
+			// request can be refused before the code under test runs. A header that
+			// carries an identity is the exception: a placeholder would shadow the
+			// credential the operator configured (ApplyCredentials only fills gaps),
+			// turning an authenticated scan into an anonymous one.
+			if !isCredentialHeader(parameter.Name) {
+				headers[parameter.Name] = sampleValue(parameter)
+			}
 		}
 	}
 
@@ -239,10 +256,37 @@ func buildRequest(method, template string, operation rawOperation, base *url.URL
 		}
 	}
 
+	if formFields {
+		switch {
+		case body != nil:
+			// The description named both a body schema and form fields. The body
+			// is the explicit one; the fields still go where they went before —
+			// the query — rather than being dropped altogether, which would make
+			// the endpoint unreachable for those parameters.
+			for name, values := range form {
+				for _, value := range values {
+					query.Add(name, value)
+				}
+			}
+		case bodyCarryingMethod(method):
+			body = []byte(form.Encode())
+			contentType = "application/x-www-form-urlencoded"
+		default:
+			for name, values := range form {
+				for _, value := range values {
+					query.Add(name, value)
+				}
+			}
+		}
+	}
+
 	target.RawQuery = query.Encode()
 	request, err := httpmsg.NewRequest(method, target.String())
 	if err != nil {
 		return nil, false
+	}
+	for _, name := range sortedKeys(headers) {
+		request.Header.Set(name, headers[name])
 	}
 	if len(body) > 0 {
 		request.Body = body
@@ -252,6 +296,28 @@ func buildRequest(method, template string, operation rawOperation, base *url.URL
 		}
 	}
 	return request, true
+}
+
+// bodyCarryingMethod reports whether a method is defined to carry a request body.
+func bodyCarryingMethod(method string) bool {
+	switch strings.ToUpper(method) {
+	case "POST", "PUT", "PATCH":
+		return true
+	}
+	return false
+}
+
+// isCredentialHeader reports whether a header name carries an identity. A document
+// that names one is not asking for a sample value there; the scan's own credential is
+// the one that can authenticate.
+func isCredentialHeader(name string) bool {
+	switch strings.ToLower(strings.TrimSpace(name)) {
+	case "authorization", "proxy-authorization", "cookie",
+		"x-api-key", "x-api-token", "x-auth-token", "x-access-token",
+		"x-authorization", "x-authentication", "api-key":
+		return true
+	}
+	return false
 }
 
 // joinPaths puts a document's base path in front of an operation's path.

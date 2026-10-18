@@ -513,6 +513,9 @@ func callFunction(name string, args []Value) (Value, error) {
 		return StringValue(string(runes)), nil
 
 	case "substr":
+		if len(args) < 2 {
+			return Value{}, evalErrorf("substr needs a string and a start")
+		}
 		runes := []rune(str(0))
 		start := int(args[1].Number())
 		if start < 0 || start > len(runes) {
@@ -580,6 +583,9 @@ func callFunction(name string, args []Value) (Value, error) {
 		return StringValue(string(decoded)), nil
 
 	case "to_number", "tonumber":
+		if len(args) < 1 {
+			return Value{}, evalErrorf("to_number needs an argument")
+		}
 		return NumberValue(args[0].Number()), nil
 
 	case "rand_int":

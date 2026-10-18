@@ -108,7 +108,7 @@ func TestWorthReplaying(t *testing.T) {
 // through before anything is sent again.
 func TestReplayObservedDropsWhatIsOutOfScope(t *testing.T) {
 	c := newTestCrawler(t, "example.com")
-	if got := c.replayObserved(t.Context(), []observedRequest{
+	if got, _ := c.replayObserved(t.Context(), []observedRequest{
 		{URL: "http://other.example.net/api", Method: "POST", Body: []byte(`{"a":1}`)},
 		{URL: "http://example.com/logout", Method: "POST"},
 		{URL: "mailto:someone@example.com", Method: "POST", Body: []byte("x=1")},

@@ -11,7 +11,6 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/guaidao2/crackweb/internal/finding"
@@ -38,12 +37,6 @@ type Runner struct {
 	// Bundle is unused by the runner itself but kept for callers that render
 	// findings from the same place.
 	Bundle any
-
-	mu sync.Mutex
-	// derived caches the clients a block asks for, keyed by the redirect and
-	// cookie policy it named, so a template that follows redirects builds one
-	// client instead of one per request.
-	derived map[string]*httpclient.Client
 }
 
 // NewRunner builds a template runner.
@@ -81,6 +74,7 @@ func (r *Runner) Execute(ctx context.Context, tmpl *Template, target *httpmsg.Re
 		vars:     vars,
 		internal: map[string][]string{},
 		jar:      jar,
+		clients:  map[string]*httpclient.Client{},
 		observe:  observe,
 	}
 
@@ -112,6 +106,11 @@ type templateRun struct {
 	internal map[string][]string
 	// jar is shared by the blocks of the template.
 	jar http.CookieJar
+	// clients caches the clients this run's blocks ask for, keyed by the redirect
+	// and cookie policy each named. It lives on the run rather than on the Runner:
+	// the Runner serves every target in a scan, and a cache keyed by the run's jar
+	// kept one client — and the whole cookie jar behind it — alive per target.
+	clients map[string]*httpclient.Client
 	// observe reports each request to the scan that started this run.
 	observe func(*httpmsg.Request)
 	// findings accumulates what the run reported.
@@ -129,7 +128,7 @@ func (run *templateRun) block(ctx context.Context, block HTTPRequest) bool {
 		return false
 	}
 
-	client := run.runner.clientFor(run.jar, block)
+	client := run.clientFor(block)
 	// req-condition keeps the conversation. nuclei stores every request's
 	// variables under a numbered name as well as its own, so a matcher can
 	// compare response 1 with response 2 instead of only seeing the last one.
@@ -191,7 +190,7 @@ func (run *templateRun) send(ctx context.Context, client *httpclient.Client, req
 }
 
 // clientFor returns the client a block's redirect and cookie fields ask for.
-func (r *Runner) clientFor(jar http.CookieJar, block HTTPRequest) *httpclient.Client {
+func (run *templateRun) clientFor(block HTTPRequest) *httpclient.Client {
 	policy := httpclient.RedirectPolicy{
 		Follow:     block.Redirects || block.HostRedirects || block.ProtocolRedirects,
 		SameHost:   block.HostRedirects,
@@ -200,18 +199,15 @@ func (r *Runner) clientFor(jar http.CookieJar, block HTTPRequest) *httpclient.Cl
 	}
 	useJar := !block.DisableCookie
 
-	key := fmt.Sprintf("%t|%t|%t|%d|%t|%p", policy.Follow, policy.SameHost, policy.SameScheme, policy.Max, useJar, jar)
-	r.mu.Lock()
-	if client, ok := r.derived[key]; ok {
-		r.mu.Unlock()
+	key := fmt.Sprintf("%t|%t|%t|%d|%t", policy.Follow, policy.SameHost, policy.SameScheme, policy.Max, useJar)
+	if run.clients == nil {
+		run.clients = map[string]*httpclient.Client{}
+	}
+	if client, ok := run.clients[key]; ok {
 		return client
 	}
-	if r.derived == nil {
-		r.derived = map[string]*httpclient.Client{}
-	}
-	client := r.Client.Derived(policy, jar, useJar)
-	r.derived[key] = client
-	r.mu.Unlock()
+	client := run.runner.Client.Derived(policy, run.jar, useJar)
+	run.clients[key] = client
 	return client
 }
 

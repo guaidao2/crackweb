@@ -89,6 +89,10 @@ func runScan(app *App, opts *scanOptions, _ []string) error {
 	if err != nil {
 		return err
 	}
+	// The identity belongs on the message model before any check sees this request:
+	// the checks read that object, and the client no longer writes to it while
+	// sending (which raced with the checks and duplicated the cookie).
+	client.ApplyCredentials(request)
 
 	selected, err := selectedChecks(app, *opts.checks, *opts.templates, client, *opts.unsafeChecks)
 	if err != nil {
@@ -230,6 +234,7 @@ func submitForms(ctx context.Context, checkCtx *checks.Context, scanner *scan.Sc
 	}
 
 	for _, formReq := range submitted {
+		checkCtx.Client.ApplyCredentials(formReq)
 		formResp, err := checkCtx.Do(ctx, formReq)
 		if err != nil || formResp == nil {
 			continue

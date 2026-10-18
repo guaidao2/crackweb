@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/guaidao2/crackweb/internal/httpmsg"
 	"github.com/guaidao2/crackweb/internal/payload"
 )
 
@@ -114,11 +115,15 @@ func (c *Context) ProbeOOB(
 			// legal: a shell payload contains spaces and semicolons, and those
 			// cannot appear raw in a request line. The extra rounds are the
 			// evasion — a filter that decodes once still sees the inner encoding
-			// rather than the payload.
-			value = url.QueryEscape(value)
-			for i := 0; i < layer; i++ {
-				value = url.QueryEscape(value)
+			// rather than the payload. A structured body (JSON, multipart) is
+			// written as it stands instead: the envelope encoder already quotes
+			// it, and percent-encoding a URL inside a JSON string delivers a
+			// literal percent sequence the application never decodes.
+			encoded, ok := oobPayloadFor(*t.Param, value, layer)
+			if !ok {
+				continue
 			}
+			value = encoded
 
 			// Sent verbatim: the encoding above is the whole point, and letting
 			// the transport encode again would double it.
@@ -181,6 +186,44 @@ func (c *Context) awaitCallbacks(ctx context.Context, pending []pendingAttempt, 
 		case <-ctx.Done():
 			return nil
 		}
+	}
+}
+
+// oobPayloadFor applies the transport encoding an injected value needs for the location
+// it is going into.
+//
+// A query or form value is percent-encoded, once for legality and once more per evasion
+// layer. A JSON string or a multipart part is written raw: the body rewriter quotes it as
+// the document requires, and percent-encoding it first would put a sequence the
+// application never decodes where a URL was expected. Structured bodies have no encoding
+// layers, so the second and later rounds are skipped rather than sent as duplicates.
+func oobPayloadFor(param httpmsg.Param, value string, layer int) (string, bool) {
+	// A value inside a document carried as another parameter is rebuilt together
+	// with its envelope, and the envelope writer escapes it. Encoding it here would
+	// put a percent sequence inside that document, where no application looks for a
+	// URL.
+	if param.Wrapper != httpmsg.WrapNone {
+		if layer > 0 {
+			return "", false
+		}
+		return value, true
+	}
+	switch param.In {
+	case httpmsg.LocQuery, httpmsg.LocBody, httpmsg.LocCookie, httpmsg.LocMultipartFilename:
+		// These are written into a request line or a header-like field. Encoding
+		// once is what makes the value legal there (a newline in a Cookie value
+		// would make net/http reject the request), and the extra rounds are the
+		// evasion.
+		value = url.QueryEscape(value)
+		for i := 0; i < layer; i++ {
+			value = url.QueryEscape(value)
+		}
+		return value, true
+	default:
+		if layer > 0 {
+			return "", false
+		}
+		return value, true
 	}
 }
 

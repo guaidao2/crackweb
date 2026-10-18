@@ -24,7 +24,7 @@ import (
 // DefaultListen is where the proxy listens when the user does not say.
 const DefaultListen = "127.0.0.1:7777"
 
-// DefaultTimeout bounds a single outgoing request.
+// DefaultTimeout bounds how long an origin may take to begin answering.
 const DefaultTimeout = 30 * time.Second
 
 // DefaultMaxBody bounds how much of any body the proxy buffers.
@@ -43,7 +43,12 @@ type Options struct {
 	// Insecure skips verification of the target's own certificate, which is
 	// normal when testing a staging box with a self-signed cert.
 	Insecure bool
-	// Timeout bounds a single outgoing request.
+	// Timeout bounds how long the origin may take to send its response headers.
+	// It is deliberately not a whole-exchange deadline: a download may take
+	// longer than any value chosen for scanning, and cutting its body off would
+	// turn a slow target into a broken one. A server that accepts the connection
+	// and then says nothing is the failure worth bounding, and this is that
+	// bound.
 	Timeout time.Duration
 	// MaxBody bounds buffered bodies.
 	MaxBody int64
@@ -107,6 +112,7 @@ func New(opts Options) (*Proxy, error) {
 		MaxIdleConnsPerHost:   16,
 		IdleConnTimeout:       90 * time.Second,
 		TLSHandshakeTimeout:   15 * time.Second,
+		ResponseHeaderTimeout: opts.Timeout,
 		ExpectContinueTimeout: 1 * time.Second,
 		TLSClientConfig: &tls.Config{
 			InsecureSkipVerify: opts.Insecure,

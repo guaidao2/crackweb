@@ -123,6 +123,13 @@ func (p *Probe) Probe(ctx context.Context, target, marker string) (bool, string,
 
 	loadCtx, cancelLoad := context.WithTimeout(tabCtx, p.timeout)
 	defer cancelLoad()
+	// The caller's context bounds this probe as well. Without this the probe kept
+	// loading for its whole timeout after a scan was stopped, because the load context
+	// was derived from the browser's lifetime rather than the caller's.
+	if ctx != nil {
+		stop := context.AfterFunc(ctx, cancelLoad)
+		defer stop()
+	}
 
 	// A load that reports an error may still have run the script that matters — a page
 	// whose subresources failed is not a page that did nothing — so the element is looked
@@ -149,9 +156,6 @@ func (p *Probe) Probe(ctx context.Context, target, marker string) (bool, string,
 	return true, detail, nil
 }
 
-// jsString renders a value as a JavaScript string literal. The marker is generated, not
-// received, but a probe that interpolates into script without quoting is the very mistake
-// it is testing for.
 // Eval loads a target and returns the value of a JavaScript expression in that page.
 //
 // Like Probe, a load that reports an error may still have run the script that matters, so
@@ -174,6 +178,10 @@ func (p *Probe) Eval(ctx context.Context, target, expression string) (string, er
 
 	loadCtx, cancelLoad := context.WithTimeout(tabCtx, p.timeout)
 	defer cancelLoad()
+	if ctx != nil {
+		stop := context.AfterFunc(ctx, cancelLoad)
+		defer stop()
+	}
 
 	_ = chromedp.Run(loadCtx,
 		chromedp.Navigate(target),
@@ -190,6 +198,9 @@ func (p *Probe) Eval(ctx context.Context, target, expression string) (string, er
 	return fmt.Sprint(raw), nil
 }
 
+// jsString renders a value as a JavaScript string literal. The marker is generated, not
+// received, but a probe that interpolates into script without quoting is the very mistake
+// it is testing for.
 func jsString(value string) string {
 	var b strings.Builder
 	b.WriteByte('\'')

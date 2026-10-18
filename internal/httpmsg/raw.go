@@ -190,20 +190,53 @@ func writeHeader(buf *bytes.Buffer, header Header) {
 }
 
 // splitHeadBody separates the head from the entity body at the first blank
-// line. Line endings are normalised to LF for parsing; the body is returned
-// untouched apart from that normalisation, which never changes body semantics
-// for the textual formats crackweb deals with.
+// line. Line endings are normalised to LF in the head only; the body is
+// returned exactly as it arrived.
+//
+// Rewriting the body was the original mistake: a multipart upload, a gzip
+// stream and any other binary entity legitimately contain CRLF inside its own
+// framing, and replacing those bytes corrupts the file the capture describes.
+// The split therefore happens on the bytes as they are, and normalisation is
+// confined to the part that is parsed as lines.
 func splitHeadBody(data []byte) (string, []byte, error) {
 	if len(bytes.TrimSpace(data)) == 0 {
 		return "", nil, ErrEmptyMessage
 	}
-	normalised := bytes.ReplaceAll(data, []byte("\r\n"), []byte("\n"))
-	if i := bytes.Index(normalised, []byte("\n\n")); i >= 0 {
-		head := string(normalised[:i])
-		body := normalised[i+2:]
-		return head, body, nil
+	head, body, found := cutHeadBody(data)
+	if !found {
+		return normaliseHead(data), nil, nil
 	}
-	return string(normalised), nil, nil
+	return normaliseHead(head), body, nil
+}
+
+// cutHeadBody finds the end of the head without changing a byte of the body.
+//
+// HTTP writes the boundary as CRLF CRLF, but captures handled by editors and
+// hand-written requests routinely use LF LF, and a mixed pair is possible too.
+// All three are recognised; the earliest one wins.
+func cutHeadBody(data []byte) (head, body []byte, found bool) {
+	boundary := -1
+	boundaryLen := 0
+	for _, separator := range [][]byte{[]byte("\r\n\r\n"), []byte("\n\n"), []byte("\n\r\n")} {
+		if index := bytes.Index(data, separator); index >= 0 && (boundary < 0 || index < boundary) {
+			boundary, boundaryLen = index, len(separator)
+		}
+	}
+	if boundary >= 0 {
+		return data[:boundary], data[boundary+boundaryLen:], true
+	}
+	return nil, nil, false
+}
+
+// normaliseHead turns the head's line endings into LF, which is what the line
+// splitter and the field parser expect.
+//
+// A head ending in CRLF whose blank line was written as a bare LF keeps a stray
+// CR at the end after the split; trimming it is what keeps the last field's value
+// from carrying it into a URL or a header.
+func normaliseHead(head []byte) string {
+	head = bytes.TrimSuffix(head, []byte("\r"))
+	return string(bytes.ReplaceAll(head, []byte("\r\n"), []byte("\n")))
 }
 
 // splitLines splits a head block into lines, dropping a trailing empty line.

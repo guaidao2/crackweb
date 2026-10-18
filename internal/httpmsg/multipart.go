@@ -61,7 +61,7 @@ func (r *Request) multipartParams() []Param {
 			location = LocMultipartFilename
 			start, end = part.nameStart, part.nameEnd
 		}
-		if start < 0 || end > len(r.Body) || start >= end {
+		if start < 0 || end > len(r.Body) || start > end {
 			continue
 		}
 		raw := string(r.Body[start:end])
@@ -156,7 +156,7 @@ func scanMultipart(body []byte, boundary string) ([]multipartPart, bool) {
 		name, filename, isFile := partDisposition(headers)
 
 		part := multipartPart{name: name, file: isFile, nameStart: -1, nameEnd: -1}
-		if isFile && filename != "" {
+		if isFile {
 			if start, end, ok := filenameRange(headers, headerStart, filename); ok {
 				part.nameStart, part.nameEnd = start, end
 			}

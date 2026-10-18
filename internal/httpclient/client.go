@@ -393,28 +393,41 @@ func (c *Client) buildRequest(ctx context.Context, req *httpmsg.Request, anonymo
 	// for the control a check runs to establish whether a resource is protected at all — a
 	// control that carries the credential proves the opposite of what it is for.
 	if !anonymous {
-		c.applyCredentials(httpReq, req)
+		c.applyCredentials(httpReq)
 	}
 
 	return httpReq, nil
 }
 
-// applyCredentials adds the configured identity to an outgoing request, and to the message
-// model the checks read.
+// ApplyCredentials adds the configured identity to a request's message model.
 //
-// Both have to be written. The wire request is what proves the identity was sent; the message
-// model is what the checks see, and a check that looks at the request it was handed — anything
-// testing a credential, and the passive checks that report on headers — reads that one. Writing
-// only the wire request means every check runs against the anonymous view while the crawl
-// browses as the authenticated user: the scanner believes it is testing what is behind the
-// login, and reports on the login page.
-func (c *Client) applyCredentials(httpReq *http.Request, req *httpmsg.Request) {
-	set := func(name, value string) {
-		httpReq.Header.Set(name, value)
-		if req != nil {
-			req.Header.Set(name, value)
+// It is called once, when a request enters the tool, before checks share it. The message
+// model is what the checks read, so it has to carry the identity — but writing it from Do
+// was wrong in two ways. The request is shared by checks running side by side, so mutating
+// it there was a data race; and the Cookie merge appended the credential again on every
+// request the same object was used for, so a scan with --cookie sent a header that grew with
+// each probe.
+func (c *Client) ApplyCredentials(req *httpmsg.Request) {
+	if c == nil || req == nil {
+		return
+	}
+	for _, cred := range c.opts.Credentials {
+		if cred.Name == "" || cred.Value == "" {
+			continue
+		}
+		if strings.EqualFold(cred.Name, "Cookie") {
+			req.Header.Set("Cookie", mergeCookieValue(req.Header.Get("Cookie"), cred.Value))
+			continue
+		}
+		if req.Header.Get(cred.Name) == "" {
+			req.Header.Set(cred.Name, cred.Value)
 		}
 	}
+}
+
+// applyCredentials adds the configured identity to an outgoing wire request. It does not
+// touch the message model: that request's identity was applied when it entered the tool.
+func (c *Client) applyCredentials(httpReq *http.Request) {
 	for _, cred := range c.opts.Credentials {
 		if cred.Name == "" || cred.Value == "" {
 			continue
@@ -424,11 +437,7 @@ func (c *Client) applyCredentials(httpReq *http.Request, req *httpmsg.Request) {
 			// own — a CSRF token, a consent flag, a language preference — and
 			// dropping them would break the very session this exists to
 			// preserve.
-			if existing := httpReq.Header.Get("Cookie"); existing != "" {
-				set("Cookie", existing+"; "+cred.Value)
-			} else {
-				set("Cookie", cred.Value)
-			}
+			httpReq.Header.Set("Cookie", mergeCookieValue(httpReq.Header.Get("Cookie"), cred.Value))
 			continue
 		}
 		// Every other header only fills a gap. A request that already names an
@@ -436,9 +445,48 @@ func (c *Client) applyCredentials(httpReq *http.Request, req *httpmsg.Request) {
 		// it would be the one thing a scanner must never do to an authenticated
 		// request.
 		if httpReq.Header.Get(cred.Name) == "" {
-			set(cred.Name, cred.Value)
+			httpReq.Header.Set(cred.Name, cred.Value)
 		}
 	}
+}
+
+// mergeCookieValue appends the cookie pairs a credential names that the existing header
+// does not already carry. Matching is by name: a request's own value for a name wins, so a
+// scan configured with --cookie can never overwrite a session a check supplied deliberately.
+func mergeCookieValue(existing, value string) string {
+	if existing == "" {
+		return value
+	}
+	merged := existing
+	for _, pair := range strings.Split(value, ";") {
+		pair = strings.TrimSpace(pair)
+		if pair == "" || cookiePairPresent(merged, pair) {
+			continue
+		}
+		merged += "; " + pair
+	}
+	return merged
+}
+
+// cookiePairPresent reports whether a Cookie header already carries the named pair.
+func cookiePairPresent(header, pair string) bool {
+	name, _, ok := strings.Cut(pair, "=")
+	if !ok {
+		// A value without "=" is not a cookie pair, but treating its whole text as
+		// the name keeps a repeated bare token from being appended twice.
+		name = pair
+	}
+	name = strings.TrimSpace(name)
+	for _, existing := range strings.Split(header, ";") {
+		existingName, _, found := strings.Cut(strings.TrimSpace(existing), "=")
+		if !found {
+			existingName = strings.TrimSpace(existing)
+		}
+		if strings.EqualFold(strings.TrimSpace(existingName), name) {
+			return true
+		}
+	}
+	return false
 }
 
 // userAgent returns the User-Agent to send.
