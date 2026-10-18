@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -58,7 +59,38 @@ func (h *harness) run(t *testing.T, check checks.Check, targetURL string) []*fin
 	}
 
 	target := &checks.Target{Request: request, Response: baseline}
-	return check.Run(context.Background(), h.ctx, target)
+	findings := check.Run(context.Background(), h.ctx, target)
+	checkEvidenceCarriesPayload(t, findings)
+	return findings
+}
+
+// checkEvidenceCarriesPayload holds every finding to one rule: the request it records has to be the
+// one that sent the payload it names. That request is what the terminal prints as a replay command
+// and what a report's curl field is built from, so a finding that records a different probe
+// describes something a reader cannot reproduce.
+func checkEvidenceCarriesPayload(t *testing.T, findings []*finding.Finding) {
+	t.Helper()
+	for _, f := range findings {
+		if f.Payload == "" || len(f.Evidence.Request) == 0 {
+			continue
+		}
+		payload := f.Payload
+		// Some checks append where the payload landed — "value (header X)" — and that note is for a
+		// reader, not part of what went on the wire.
+		if index := strings.LastIndex(payload, " ("); index > 0 {
+			payload = payload[:index]
+		}
+		raw := string(f.Evidence.Request)
+		decoded, err := url.QueryUnescape(raw)
+		if err != nil {
+			decoded = raw
+		}
+		if strings.Contains(decoded, payload) || strings.Contains(raw, payload) {
+			continue
+		}
+		t.Errorf("%s: the evidence request does not carry the payload %q it names:\n%s",
+			f.CheckID, f.Payload, raw)
+	}
 }
 
 // withParameter returns the target with its first parameter selected, which is
@@ -80,7 +112,9 @@ func withParameter(t *testing.T, h *harness, check checks.Check, targetURL strin
 		t.Fatal("test URL has no parameters")
 	}
 	target := &checks.Target{Request: request, Response: baseline, Param: &params[0]}
-	return check.Run(context.Background(), h.ctx, target)
+	findings := check.Run(context.Background(), h.ctx, target)
+	checkEvidenceCarriesPayload(t, findings)
+	return findings
 }
 
 func TestSQLiErrorFiresOnDatabaseError(t *testing.T) {

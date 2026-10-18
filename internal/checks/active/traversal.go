@@ -631,9 +631,9 @@ func nosqlParameterNameOracle(ctx context.Context, c *checks.Context, t *checks.
 		fp := c.Fingerprint(response, restoreFor(value)...)
 		return fp, request, response, true
 	}
-	trueOne, _, _, okTrueOne := send(nosqlNameOperators[0].operator, nosqlNameOperators[0].value)
+	trueOne, trueReq, trueResp, okTrueOne := send(nosqlNameOperators[0].operator, nosqlNameOperators[0].value)
 	trueTwo, _, _, okTrueTwo := send(nosqlNameOperators[1].operator, nosqlNameOperators[1].value)
-	falseOne, falseReq, falseResp, okFalse := send(nosqlNameOperators[2].operator, nosqlNameOperators[2].value)
+	falseOne, _, _, okFalse := send(nosqlNameOperators[2].operator, nosqlNameOperators[2].value)
 	if !okTrueOne || !okTrueTwo || !okFalse {
 		return nil
 	}
@@ -659,8 +659,8 @@ func nosqlParameterNameOracle(ctx context.Context, c *checks.Context, t *checks.
 	f.Confidence = finding.ConfidenceFirm
 	f.Payload = name + nosqlNameOperators[0].operator
 	f.CWE = "CWE-943"
-	f.Evidence.Request = falseReq.Raw()
-	f.Evidence.Response = truncate(falseResp.Body, 8192)
+	f.Evidence.Request = trueReq.Raw()
+	f.Evidence.Response = truncate(trueResp.Body, 8192)
 	f.Evidence.Baseline = truncate(t.Response.Body, 4096)
 	f.Evidence.Matches = []string{
 		"the parameter name is read as a query operator: " + name + nosqlNameOperators[0].operator +
