@@ -1,6 +1,7 @@
 package payload
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -268,5 +269,26 @@ func TestEmptyInputIsSafe(t *testing.T) {
 	}
 	if best := Best(nil); best != 0 {
 		t.Errorf("Best(nil) = %d", best)
+	}
+}
+
+// TestEverySeedIsExpanded: generation 0 is one request per seed, and the list is not truncated. A
+// check whose coverage is carried by its seeds would otherwise lose the tail of the list without a
+// word, and keep reporting a target as clean.
+func TestEverySeedIsExpanded(t *testing.T) {
+	seeds := make([]string, 0, 40)
+	for index := 0; index < 40; index++ {
+		seeds = append(seeds, fmt.Sprintf("payload-%02d", index))
+	}
+
+	generations := Generations(Traversal, seeds)
+	if len(generations) == 0 {
+		t.Fatal("no generations were produced")
+	}
+	if len(generations[0]) != len(seeds) {
+		t.Fatalf("generation 0 holds %d of %d seeds", len(generations[0]), len(seeds))
+	}
+	if last := generations[0][len(generations[0])-1].Value; last != seeds[len(seeds)-1] {
+		t.Errorf("the last seed became %q, want %q", last, seeds[len(seeds)-1])
 	}
 }

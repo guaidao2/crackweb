@@ -225,6 +225,35 @@ func TestPathTraversalFiresWhenTheIncludeAppendsAnExtension(t *testing.T) {
 	}
 }
 
+// TestPathTraversalAsksForTheScriptTheRequestReached: the entry point is `view.php`, not the
+// conventional `index.php`, and the include appends the extension. Only a name taken from the
+// request can reach it, which is what makes the seeds work on applications in general rather than
+// on the ones that happen to name their entry point `index`.
+func TestPathTraversalAsksForTheScriptTheRequestReached(t *testing.T) {
+	source := "<?php\n// Entry point.\ninclude($_GET['page'] . '.php');\n"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		const wrapper = "php://filter/convert.base64-encode/resource="
+		if strings.TrimPrefix(r.URL.Query().Get("page"), wrapper) == "view" {
+			fmt.Fprintf(w, "<html><body><hr/><br/>%s</body></html>",
+				base64.StdEncoding.EncodeToString([]byte(source)))
+			return
+		}
+		fmt.Fprint(w, "<html><body><hr/><br/></body></html>")
+	}))
+	defer server.Close()
+
+	h := newHarness(t)
+	findings := withParameter(t, h, pathTraversal{}, server.URL+"/app/view.php?page=login")
+
+	if len(findings) == 0 {
+		t.Fatal("an inclusion reached through the script named by the request was not detected")
+	}
+	if !strings.Contains(findings[0].Payload, "resource=view") {
+		t.Errorf("the payload names %q, want the script the request reached", findings[0].Payload)
+	}
+}
+
 // TestPathTraversalStaysQuietWhenThePagePublishesEncodedSource: a page that shows base64 of a PHP
 // snippet carries the source shape before any payload is sent, and reporting it would be a false
 // positive on every page that prints code.

@@ -3,6 +3,8 @@ package active
 import (
 	"context"
 	"html"
+	"net/url"
+	"path"
 	"strings"
 
 	"github.com/guaidao2/crackweb/internal/checks"
@@ -40,13 +42,6 @@ var traversalSeeds = []string{
 	// chooses the encoding of, and a filter that blocks `../` says nothing about
 	// them.
 	"php://filter/convert.base64-encode/resource=/etc/passwd",
-	// An inclusion that appends an extension — `include($page . ".php")` — resolves every
-	// absolute path above to a file that does not exist: `/etc/passwd` opens as
-	// `/etc/passwd.php`. The application's own script is still reachable when it is named
-	// without the extension the code adds.
-	"php://filter/convert.base64-encode/resource=index.php",
-	"php://filter/convert.base64-encode/resource=index",
-	"php://filter/convert.base64-encode/resource=../index",
 	"expect://id",
 	// Path-normalisation confusion. Servers and their front-ends disagree about
 	// what these resolve to, and a check that only tried `../` sequences would
@@ -107,6 +102,44 @@ func looksLikePHPSource(view string) bool {
 	return strings.HasPrefix(strings.TrimLeft(view, " \t\r\n\ufeff"), "<?php")
 }
 
+// inclusionSeeds names the files the request itself points at, for the stream wrapper to read.
+//
+// An inclusion that appends an extension resolves a name written without it, so the file worth
+// asking for is the script the request already reached: a request to `/app/view.php` is answered by
+// including `view` or `view.php`, depending on which side writes the extension. The names come from
+// the request, which makes them the target's own rather than an assumption about how applications
+// name their entry point.
+func inclusionSeeds(t *checks.Target) []string {
+	if t == nil || t.Request == nil {
+		return nil
+	}
+	parsed, err := url.Parse(t.Request.URLString())
+	if err != nil {
+		return nil
+	}
+	// A request for a directory reaches the directory's index.
+	base := "index.php"
+	if !strings.HasSuffix(parsed.Path, "/") && parsed.Path != "" {
+		base = path.Base(parsed.Path)
+	}
+	extension := path.Ext(base)
+	stem := strings.TrimSuffix(base, extension)
+	if stem == "" || stem == "." {
+		return nil
+	}
+	if extension == "" {
+		extension = ".php"
+	}
+
+	seeds := make([]string, 0, 4)
+	for _, name := range []string{stem, stem + extension} {
+		seeds = append(seeds,
+			"php://filter/convert.base64-encode/resource="+name,
+			"php://filter/convert.base64-encode/resource=../"+name)
+	}
+	return seeds
+}
+
 // pathTraversal detects directory traversal and local file inclusion.
 type pathTraversal struct{}
 
@@ -143,24 +176,33 @@ func (pathTraversal) Run(ctx context.Context, c *checks.Context, t *checks.Targe
 	c.ProbeWAF(ctx, t)
 
 	var matched, matchedView string
-	attempt, err := c.SendVariants(ctx, t, payload.Traversal, "path-traversal", traversalSeeds,
-		func(_ *httpmsg.Request, resp *httpmsg.Response, _ payload.Variant) bool {
-			// The file may have been read and then printed through an encoding, in which case
-			// the signature is present but not in the clear.
-			for _, view := range decodedViews(resp.Body) {
-				// The wrapper seeds read the application's own script, so the response opens
-				// with the tag every PHP file opens with.
-				if !sourceOnThePage && looksLikePHPSource(view) {
-					matched, matchedView = "<?php", view
-					return true
-				}
-				if found := firstNewSignature(strings.ToLower(view), baseline, traversalSignatures); found != "" {
-					matched, matchedView = found, view
-					return true
-				}
+	judge := func(_ *httpmsg.Request, resp *httpmsg.Response, _ payload.Variant) bool {
+		// The file may have been read and then printed through an encoding, in which case
+		// the signature is present but not in the clear.
+		for _, view := range decodedViews(resp.Body) {
+			// The wrapper seeds read the application's own script, so the response opens
+			// with the tag every PHP file opens with.
+			if !sourceOnThePage && looksLikePHPSource(view) {
+				matched, matchedView = "<?php", view
+				return true
 			}
-			return false
-		})
+			if found := firstNewSignature(strings.ToLower(view), baseline, traversalSignatures); found != "" {
+				matched, matchedView = found, view
+				return true
+			}
+		}
+		return false
+	}
+
+	attempt, err := c.SendVariants(ctx, t, payload.Traversal, "path-traversal", traversalSeeds, judge)
+	if attempt == nil {
+		// The names the request itself reaches, asked for only when nothing above was read.
+		//
+		// This is a second round rather than more seeds in the first: the mutation walk escalates on
+		// the evidence of what the earlier payloads ran into, and a longer seed list changes which
+		// generation that evidence comes from.
+		attempt, err = c.SendVariants(ctx, t, payload.Traversal, "path-traversal", inclusionSeeds(t), judge)
+	}
 	if err != nil || attempt == nil {
 		return nil
 	}
