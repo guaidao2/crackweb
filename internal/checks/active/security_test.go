@@ -361,3 +361,69 @@ func TestXXEFiresOnFormXMLField(t *testing.T) {
 	}
 	checkEvidenceCarriesPayload(t, findings)
 }
+
+func withMultipartParameter(t *testing.T, h *harness, check checks.Check, rawURL, field, value string) []*finding.Finding {
+	t.Helper()
+	const boundary = "crackweb-boundary"
+	body := "--" + boundary + "\r\nContent-Disposition: form-data; name=\"" + field +
+		"\"\r\n\r\n" + value + "\r\n--" + boundary + "--\r\n"
+	request, err := httpmsg.NewRequest("POST", rawURL)
+	if err != nil {
+		t.Fatalf("NewRequest: %v", err)
+	}
+	request.Body = []byte(body)
+	request.Header.Set("Content-Type", "multipart/form-data; boundary="+boundary)
+	request.Header.Set("Content-Length", fmt.Sprint(len(body)))
+
+	baseline, err := h.client.Do(context.Background(), request)
+	if err != nil {
+		t.Fatalf("baseline: %v", err)
+	}
+	params := request.Params()
+	for i := range params {
+		if params[i].Name == field {
+			target := &checks.Target{Request: request, Response: baseline, Param: &params[i]}
+			return check.Run(context.Background(), h.ctx, target)
+		}
+	}
+	t.Fatalf("multipart field %q was not addressed", field)
+	return nil
+}
+
+func TestXXEFiresOnMultipartXMLPart(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = r.ParseMultipartForm(1 << 20)
+		if strings.Contains(r.FormValue("xml"), "file:///etc/passwd") {
+			_, _ = w.Write([]byte("<pre>root:x:0:0:root:/root:/bin/bash</pre>"))
+			return
+		}
+		_, _ = w.Write([]byte(`<form method="post" enctype="multipart/form-data"><input name="xml"></form>`))
+	}))
+	defer server.Close()
+
+	h := newHarness(t)
+	findings := withMultipartParameter(t, h, xxe{}, server.URL+"/xxe", "xml", "<root/>")
+	if len(findings) == 0 {
+		t.Fatal("a multipart XML part was not tested")
+	}
+	checkEvidenceCarriesPayload(t, findings)
+}
+
+func TestXXEFiresOnPhpFilterFileRead(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = r.ParseForm()
+		if strings.Contains(r.PostForm.Get("xml"), "php://filter") {
+			_, _ = w.Write([]byte("<pre>cm9vdDp4OjA6MDpyb290Oi9yb290Oi9iaW4vYmFzaAo=</pre>"))
+			return
+		}
+		_, _ = w.Write([]byte(`<form method="post"><textarea name="xml"></textarea></form>`))
+	}))
+	defer server.Close()
+
+	h := newHarness(t)
+	findings := withFormParameter(t, h, xxe{}, server.URL+"/xxe", "xml=")
+	if len(findings) == 0 {
+		t.Fatal("a php://filter file read was not detected")
+	}
+	checkEvidenceCarriesPayload(t, findings)
+}

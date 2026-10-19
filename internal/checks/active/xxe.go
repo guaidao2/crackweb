@@ -45,7 +45,7 @@ var xxeFileSignatures = []string{
 	"daemon:x:1:1",
 	"[boot loader]",
 	"for 16-bit app support",
-	"cm9vd" + ":x:0:0", // base64 of root:x:0:0, for the php://filter form
+	"cm9vddp4oja6", // lower-cased prefix of base64(root:x:0:0:root:/root:/bin/bash), for php://filter
 }
 
 // xxe detects XML external entity injection.
@@ -257,7 +257,7 @@ func xxeFormParam(t *checks.Target) (*httpmsg.Param, bool) {
 }
 
 func xmlFormField(p httpmsg.Param) bool {
-	if p.In != httpmsg.LocBody {
+	if p.In != httpmsg.LocBody && p.In != httpmsg.LocMultipart {
 		return false
 	}
 	if strings.Contains(strings.ToLower(p.Name), "xml") {
