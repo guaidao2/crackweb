@@ -340,3 +340,24 @@ func TestNewChecksAreRegistered(t *testing.T) {
 		}
 	}
 }
+
+// TestXXEFiresOnFormXMLField covers the shape Wapiti calls an XXE: the request
+// is a form post whose xml field carries the document, not an XML body.
+func TestXXEFiresOnFormXMLField(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = r.ParseForm()
+		if strings.Contains(r.PostForm.Get("xml"), "file:///etc/passwd") {
+			_, _ = w.Write([]byte("<pre>root:x:0:0:root:/root:/bin/bash</pre>"))
+			return
+		}
+		_, _ = w.Write([]byte(`<form method="post"><textarea name="xml"></textarea></form>`))
+	}))
+	defer server.Close()
+
+	h := newHarness(t)
+	findings := withFormParameter(t, h, xxe{}, server.URL+"/xxe", "xml=")
+	if len(findings) == 0 {
+		t.Fatal("a form field carrying an XML document was not tested")
+	}
+	checkEvidenceCarriesPayload(t, findings)
+}

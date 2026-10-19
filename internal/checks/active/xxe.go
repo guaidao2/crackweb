@@ -73,7 +73,8 @@ func (xxe) Run(ctx context.Context, c *checks.Context, t *checks.Target) []*find
 	if t == nil || t.Request == nil || t.Response == nil {
 		return nil
 	}
-	if !acceptsXML(t.Request) {
+	param, _ := xxeFormParam(t)
+	if !acceptsXML(t.Request) && param == nil {
 		return nil
 	}
 
@@ -88,7 +89,7 @@ func (xxe) Run(ctx context.Context, c *checks.Context, t *checks.Target) []*find
 
 	for _, seed := range xxeSeeds {
 		for _, variant := range xxeVariants(seed) {
-			mutated, response, token, callback, err := sendXXE(ctx, c, t, variant)
+			mutated, response, token, callback, err := sendXXE(ctx, c, t, variant, param)
 			if err != nil || mutated == nil || response == nil {
 				continue
 			}
@@ -151,7 +152,7 @@ func xxeVariants(seed string) []payload.Variant {
 //
 // It is a free function rather than a method: the context belongs to another
 // package, and a check has no business adding behaviour to it.
-func sendXXE(ctx context.Context, c *checks.Context, t *checks.Target, variant payload.Variant) (*httpmsg.Request, *httpmsg.Response, string, string, error) {
+func sendXXE(ctx context.Context, c *checks.Context, t *checks.Target, variant payload.Variant, param *httpmsg.Param) (*httpmsg.Request, *httpmsg.Response, string, string, error) {
 	body := variant.Value
 	token, callback := "", ""
 	if c.OOB != nil {
@@ -164,11 +165,26 @@ func sendXXE(ctx context.Context, c *checks.Context, t *checks.Target, variant p
 		return nil, nil, "", "", nil
 	}
 
-	mutated := t.Request.Clone()
-	mutated.Body = []byte(body)
-	mutated.Header.Set("Content-Type", "application/xml")
-	mutated.Header.Set("Content-Length", fmt.Sprint(len(body)))
-	mutated.Origin = httpmsg.OriginReplay
+	var (
+		mutated *httpmsg.Request
+		err     error
+	)
+	if param != nil {
+		// A form can carry an XML document as a field value. The request itself is
+		// form-urlencoded, not XML, so the document has to be written into the field
+		// and encoded as a form value; replacing the whole body would make the target
+		// see a different request.
+		mutated, err = checks.Mutate(t.Request, *param, body, checks.EncodeURL)
+		if err != nil {
+			return nil, nil, "", "", err
+		}
+	} else {
+		mutated = t.Request.Clone()
+		mutated.Body = []byte(body)
+		mutated.Header.Set("Content-Type", "application/xml")
+		mutated.Header.Set("Content-Length", fmt.Sprint(len(body)))
+		mutated.Origin = httpmsg.OriginReplay
+	}
 
 	response, err := c.Do(ctx, mutated)
 	if err != nil {
@@ -218,6 +234,38 @@ func acceptsXML(req *httpmsg.Request) bool {
 			strings.HasPrefix(trimmed, "<!DOCTYPE")
 	}
 	return false
+}
+
+// xxeFormParam finds a form field that carries an XML document. A form request
+// is not itself XML, but an import form commonly puts the document in a field
+// named "xml" (or in a field whose value already starts with a tag), and that
+// field is the injection point.
+func xxeFormParam(t *checks.Target) (*httpmsg.Param, bool) {
+	if t == nil || t.Request == nil {
+		return nil, false
+	}
+	if t.Param != nil && xmlFormField(*t.Param) {
+		return t.Param, true
+	}
+	params := t.Request.Params()
+	for i := range params {
+		if xmlFormField(params[i]) {
+			return &params[i], true
+		}
+	}
+	return nil, false
+}
+
+func xmlFormField(p httpmsg.Param) bool {
+	if p.In != httpmsg.LocBody {
+		return false
+	}
+	if strings.Contains(strings.ToLower(p.Name), "xml") {
+		return true
+	}
+	value := strings.TrimSpace(p.Value)
+	return strings.HasPrefix(value, "<?xml") || strings.HasPrefix(value, "<!DOCTYPE") ||
+		strings.HasPrefix(value, "<root") || strings.HasPrefix(value, "<svg")
 }
 
 // xxeFinding builds an XXE finding.
