@@ -10,6 +10,7 @@ package diff
 
 import (
 	"fmt"
+	"html"
 	"regexp"
 	"strings"
 )
@@ -140,6 +141,21 @@ func (n *Normalizer) Normalize(body []byte) string {
 	return s
 }
 
+// CanonicalEcho decodes HTML character references so the same character written
+// as &#39;, &#039;, &#x27; or &apos; is compared as one string. The loop is
+// bounded because a page can double-encode its echo; two passes handle that
+// without making the normaliser unbounded.
+func CanonicalEcho(s string) string {
+	for i := 0; i < 2; i++ {
+		decoded := html.UnescapeString(s)
+		if decoded == s {
+			break
+		}
+		s = decoded
+	}
+	return s
+}
+
 // NormalizeEcho normalises a body and handles parameter reflection.
 //
 // Reflection is the second big source of false positives: many pages echo the
@@ -165,17 +181,27 @@ func (n *Normalizer) NormalizeEcho(body []byte, pairs []string, detectOnly bool)
 	}
 	var echoed []string
 	if len(pairs) > 0 && len(s) <= MaxEchoBytes {
+		// A page may spell the same character as a named entity, a decimal
+		// reference with or without leading zeros, or a hexadecimal reference.
+		// Comparing the spelling is guessing the target's encoder; comparing the
+		// character is the semantic operation. The pairs are canonicalised too,
+		// so a caller may pass either the raw or an escaped form.
+		s = CanonicalEcho(s)
+		canonical := make([]string, 0, len(pairs))
+		seen := make(map[string]bool, len(pairs)/2)
 		for i := 0; i+1 < len(pairs); i += 2 {
-			pat := pairs[i]
-			if pat == "" {
+			pat := CanonicalEcho(pairs[i])
+			if pat == "" || seen[pat] {
 				continue
 			}
+			seen[pat] = true
 			if strings.Contains(s, pat) {
 				echoed = append(echoed, pat)
 			}
+			canonical = append(canonical, pat, CanonicalEcho(pairs[i+1]))
 		}
 		if !detectOnly {
-			s = strings.NewReplacer(pairs...).Replace(s)
+			s = strings.NewReplacer(canonical...).Replace(s)
 		}
 	}
 	return collapse(s), echoed

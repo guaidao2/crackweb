@@ -11,7 +11,6 @@ package active
 
 import (
 	"context"
-	"html"
 	"net/url"
 	"strconv"
 	"strings"
@@ -438,14 +437,11 @@ var booleanFamilies = []booleanFamily{
 // probe, leaves the baseline as it was, and manufactures a difference that is
 // not there. Every caller fingerprints the baseline with the same list, per
 // value; baseUnder in the boolean checks and in sqli_order_by is that symmetry.
+// echoRestore returns the raw payload and the value it replaced. NormalizeEcho
+// canonicalises HTML character references before matching, so the caller does
+// not have to enumerate the target's escaping spelling.
 func echoRestore(sent, original string) []string {
-	pairs := []string{sent, original}
-	escapedSent := html.EscapeString(sent)
-	escapedOriginal := html.EscapeString(original)
-	if escapedSent != sent {
-		pairs = append(pairs, escapedSent, escapedOriginal)
-	}
-	return pairs
+	return []string{sent, original}
 }
 
 // booleanBranch is one probe: the value sent and what came back.

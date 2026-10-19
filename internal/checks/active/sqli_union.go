@@ -222,6 +222,10 @@ func stripPayloadEcho(body, sent string) string {
 	if sent == "" {
 		return body
 	}
+	// Compare the semantic character, not one guessed encoder. This also keeps a
+	// PHP-style &#039; echo from surviving while a Go-style &#39; echo is removed.
+	body = diff.CanonicalEcho(body)
+	sent = diff.CanonicalEcho(sent)
 	// The forms the value can come back in. A payload the engine encoded goes out in that
 	// encoded shape and arrives wherever it is echoed in the decoded one — the application sees
 	// what the transport delivered, not what was written on the wire. Removing only the form
@@ -230,11 +234,13 @@ func stripPayloadEcho(body, sent string) string {
 	// place that fixes it for everybody.
 	forms := []string{sent, html.EscapeString(sent), url.QueryEscape(sent)}
 	if decoded := percentDecoded(sent); decoded != sent {
+		decoded = diff.CanonicalEcho(decoded)
 		forms = append(forms, decoded, html.EscapeString(decoded), url.QueryEscape(decoded))
 		// A server that re-encodes what it echoes replaces a byte that is not valid UTF-8 with the
 		// replacement character, so what comes back is not the decoded payload but a normalised
 		// version of it. Both spellings have to come off, or the marker survives the removal.
 		if normalised := strings.ToValidUTF8(decoded, "\uFFFD"); normalised != decoded {
+			normalised = diff.CanonicalEcho(normalised)
 			forms = append(forms, normalised, html.EscapeString(normalised),
 				url.QueryEscape(normalised))
 		}

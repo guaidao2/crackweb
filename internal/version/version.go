@@ -12,7 +12,7 @@ const (
 	// Name is the executable name.
 	Name = "crackweb"
 	// Version is the semantic version, bumped in this file alone.
-	Version = "2.5.1"
+	Version = "2.6.0"
 	// Authors is the authorship line shown in banners, help and reports.
 	Authors = "guaidao2 & coolmoon"
 	// Repo is the canonical upstream, used in help output and reports.
