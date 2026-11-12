@@ -258,6 +258,9 @@ channel that can never deliver.
 | `referer-bypass` | High |
 | `websocket-origin` | Low |
 
+XXE is tested in an XML request body, in an XML document carried by a urlencoded
+form field, and in a multipart text part.
+
 Select checks by name or by tag: `--checks sqli`, `--checks injection`, `--checks all`.
 `--passive-only` turns the proxy into a pure observation post that never sends a request
 of its own.

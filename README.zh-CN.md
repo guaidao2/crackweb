@@ -237,6 +237,8 @@ crackweb 在启动时向该部署注册，并轮询取回交互记录；部署�
 | `referer-bypass` | 高危 |
 | `websocket-origin` | 低危 |
 
+XXE 会测试 XML 请求体、urlencoded 表单字段中的 XML 文档，以及 multipart 文本部件。
+
 按名字或标签筛选：`--checks sqli`、`--checks injection`、`--checks all`。
 `--passive-only` 会把代理变成纯粹观察哨，绝不主动发出任何请求。
 

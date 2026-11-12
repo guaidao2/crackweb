@@ -178,6 +178,8 @@ func Parse(document string, base *url.URL, allowStateChange bool) (*Page, error)
 
 	page := &Page{}
 	seenLinks := map[string]bool{}
+	sourceForms := parseSourceForms(document)
+	usedSource := make([]bool, len(sourceForms))
 
 	addLink := func(raw string) {
 		raw = strings.TrimSpace(raw)
@@ -210,7 +212,17 @@ func Parse(document string, base *url.URL, allowStateChange bool) (*Page, error)
 			case "iframe", "frame", "embed":
 				addLink(attr(node, "src"))
 			case "form":
-				page.Forms = append(page.Forms, buildForm(node, base))
+				form := buildForm(node, base)
+				// The HTML parser reparents controls when a form is nested in
+				// table markup; the form node then carries no fields even though
+				// the source declares them. Fall back to the source-order form
+				// with the same action and method rather than submitting an empty
+				// body and skipping every active check.
+				if source, ok := takeSourceForm(sourceForms, usedSource, form.Action, form.Method); ok &&
+					len(form.Fields) == 0 {
+					form.Fields = source.Fields
+				}
+				page.Forms = append(page.Forms, form)
 			case "meta":
 				// http-equiv=refresh carries its target in the content attribute.
 				if strings.EqualFold(attr(node, "http-equiv"), "refresh") {
@@ -247,6 +259,101 @@ func Parse(document string, base *url.URL, allowStateChange bool) (*Page, error)
 	walk(root)
 
 	return page, nil
+}
+
+// parseSourceForms reads forms and their controls in source order. The HTML tree
+// parser reparents controls when a form is nested in table markup; this pass is
+// the fallback that preserves the fields the source actually declares.
+func parseSourceForms(document string) []Form {
+	z := html.NewTokenizer(strings.NewReader(document))
+	var forms []Form
+	var current *Form
+	capture := -1
+	for {
+		switch z.Next() {
+		case html.ErrorToken:
+			if current != nil {
+				forms = append(forms, *current)
+			}
+			return forms
+		case html.StartTagToken, html.SelfClosingTagToken:
+			name, hasAttr := z.TagName()
+			tag := string(name)
+			attrs := map[string]string{}
+			for hasAttr {
+				key, value, more := z.TagAttr()
+				attrs[strings.ToLower(string(key))] = string(value)
+				hasAttr = more
+			}
+			switch tag {
+			case "form":
+				if current == nil {
+					method := strings.ToUpper(strings.TrimSpace(attrs["method"]))
+					if method == "" {
+						method = "GET"
+					}
+					current = &Form{
+						Action:  attrs["action"],
+						Method:  method,
+						Enctype: strings.ToLower(strings.TrimSpace(attrs["enctype"])),
+					}
+				}
+			case "input":
+				if current != nil {
+					current.Fields = append(current.Fields, Field{
+						Name: attrs["name"], Value: attrs["value"], Type: attrs["type"],
+					})
+				}
+			case "textarea":
+				if current != nil {
+					current.Fields = append(current.Fields, Field{Name: attrs["name"], Type: "textarea"})
+					capture = len(current.Fields) - 1
+				}
+			case "select":
+				if current != nil {
+					current.Fields = append(current.Fields, Field{Name: attrs["name"], Type: "select"})
+					capture = -1
+				}
+			}
+		case html.TextToken:
+			if current != nil && capture >= 0 && capture < len(current.Fields) {
+				current.Fields[capture].Value += string(z.Text())
+			}
+		case html.EndTagToken:
+			name, _ := z.TagName()
+			switch string(name) {
+			case "textarea":
+				capture = -1
+			case "form":
+				if current != nil {
+					forms = append(forms, *current)
+					current = nil
+				}
+			}
+		}
+	}
+}
+
+// takeSourceForm returns the first source-order form matching action/method.
+// A tree form consumes its source counterpart even when the tree kept its
+// fields, so a later empty form cannot borrow them.
+func takeSourceForm(forms []Form, used []bool, action, method string) (Form, bool) {
+	for i := range forms {
+		if used[i] {
+			continue
+		}
+		if forms[i].Action == action && strings.EqualFold(forms[i].Method, method) {
+			used[i] = true
+			return forms[i], true
+		}
+	}
+	for i := range forms {
+		if !used[i] {
+			used[i] = true
+			return forms[i], true
+		}
+	}
+	return Form{}, false
 }
 
 // buildForm walks a form's controls.

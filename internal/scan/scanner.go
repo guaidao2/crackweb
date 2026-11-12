@@ -34,15 +34,6 @@ const DefaultConcurrency = 8
 // for very little additional coverage.
 const DefaultMaxParamsPerRequest = 20
 
-// defaultSkipParams are parameter names that are almost never worth injecting
-// into, either because they are anti-CSRF tokens that will reject the request,
-// or because they are framework plumbing.
-var defaultSkipParams = []string{
-	"csrf_token", "csrftoken", "_csrf", "csrfmiddlewaretoken", "authenticity_token",
-	"__requestverificationtoken", "xsrf_token", "_token", "nonce",
-	"submit", "commit", "reset", "button",
-}
-
 // Options configures a Scanner.
 type Options struct {
 	// Checks are the checks to run. Empty means every registered check.
@@ -51,7 +42,7 @@ type Options struct {
 	Concurrency int
 	// MaxParamsPerRequest caps parameters tested per request.
 	MaxParamsPerRequest int
-	// SkipParams adds to the built-in list of parameters not worth testing.
+	// SkipParams adds parameter names not worth testing for this deployment.
 	SkipParams []string
 	// PassiveOnly runs only the checks that do not send traffic. It is what
 	// makes a proxy session safe to point at production.
@@ -135,9 +126,6 @@ func New(opts Options, checkCtx *checks.Context) *Scanner {
 		seen:     map[string]bool{},
 		checkCtx: checkCtx,
 		started:  time.Now(),
-	}
-	for _, name := range defaultSkipParams {
-		s.skip[name] = true
 	}
 	for _, name := range opts.SkipParams {
 		s.skip[strings.ToLower(strings.TrimSpace(name))] = true
