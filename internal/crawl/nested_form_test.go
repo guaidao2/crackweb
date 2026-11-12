@@ -53,3 +53,89 @@ func TestParseRecoversControlsOfAFormNestedInTable(t *testing.T) {
 		}
 	}
 }
+
+func TestTakeSourceFormDoesNotBorrowAnUnrelatedForm(t *testing.T) {
+	forms := []Form{{Action: "expected", Method: "POST", Fields: []Field{{Name: "x"}}}}
+	used := make([]bool, len(forms))
+	if _, ok := takeSourceForm(forms, used, "other", "POST"); ok {
+		t.Fatal("an unrelated source form was borrowed")
+	}
+	if used[0] {
+		t.Fatal("an unrelated source form was consumed")
+	}
+}
+
+func TestParseRecoversSelectedOptionFromNestedForm(t *testing.T) {
+	const document = `<table><tr><form method="post" action="filter.php"><td>
+<select name="sort"><option value="asc">Asc</option><option value="desc" selected>Desc</option></select>
+<input name="q"></td></form></tr></table>`
+	base, err := url.Parse("http://example.test/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	page, err := Parse(document, base, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(page.Forms) != 1 {
+		t.Fatalf("forms = %d, want 1", len(page.Forms))
+	}
+	values := map[string]string{}
+	for _, field := range page.Forms[0].Fields {
+		values[field.Name] = field.Value
+	}
+	if values["sort"] != "desc" {
+		t.Fatalf("sort = %q, want the selected option %q (fields %+v)", values["sort"], "desc", page.Forms[0].Fields)
+	}
+}
+
+func TestParseRecoversOptionWithoutEndTag(t *testing.T) {
+	const document = `<table><tr><form method="post" action="filter.php"><td>
+<select name="sort"><option value="asc">Asc<option value="desc" selected>Desc</select>
+<input name="q"></td></form></tr></table>`
+	base, err := url.Parse("http://example.test/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	page, err := Parse(document, base, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(page.Forms) != 1 {
+		t.Fatalf("forms = %d, want 1", len(page.Forms))
+	}
+	for _, field := range page.Forms[0].Fields {
+		if field.Name == "sort" {
+			if field.Value != "desc" {
+				t.Fatalf("sort = %q, want selected option %q", field.Value, "desc")
+			}
+			return
+		}
+	}
+	t.Fatalf("sort field missing: %+v", page.Forms[0].Fields)
+}
+
+func TestParseRecoversUnclosedSelectAtFormEnd(t *testing.T) {
+	const document = `<table><tr><form method="post" action="filter.php"><td>
+<select name="sort"><option value="asc" selected>A</form></tr></table>`
+	base, err := url.Parse("http://example.test/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	page, err := Parse(document, base, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(page.Forms) != 1 {
+		t.Fatalf("forms = %d, want 1", len(page.Forms))
+	}
+	for _, field := range page.Forms[0].Fields {
+		if field.Name == "sort" {
+			if field.Value != "asc" {
+				t.Fatalf("sort = %q, want selected option %q", field.Value, "asc")
+			}
+			return
+		}
+	}
+	t.Fatalf("sort field missing: %+v", page.Forms[0].Fields)
+}

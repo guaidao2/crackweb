@@ -269,10 +269,47 @@ func parseSourceForms(document string) []Form {
 	var forms []Form
 	var current *Form
 	capture := -1
+	selectField := -1
+	optionText := strings.Builder{}
+	optionValue := ""
+	optionSelected := false
+	firstOption := ""
+	selectedOption := ""
+	inOption := false
+	finishOption := func() {
+		if current == nil || selectField < 0 || !inOption {
+			return
+		}
+		value := optionValue
+		if value == "" {
+			value = strings.TrimSpace(optionText.String())
+		}
+		if firstOption == "" {
+			firstOption = value
+		}
+		if optionSelected && selectedOption == "" {
+			selectedOption = value
+		}
+		inOption = false
+	}
+	finishSelect := func() {
+		if current == nil || selectField < 0 {
+			return
+		}
+		finishOption()
+		if selectedOption != "" {
+			current.Fields[selectField].Value = selectedOption
+		} else {
+			current.Fields[selectField].Value = firstOption
+		}
+		selectField = -1
+		inOption = false
+	}
 	for {
 		switch z.Next() {
 		case html.ErrorToken:
 			if current != nil {
+				finishSelect()
 				forms = append(forms, *current)
 			}
 			return forms
@@ -312,22 +349,43 @@ func parseSourceForms(document string) []Form {
 			case "select":
 				if current != nil {
 					current.Fields = append(current.Fields, Field{Name: attrs["name"], Type: "select"})
+					selectField = len(current.Fields) - 1
+					firstOption, selectedOption = "", ""
+					inOption = false
 					capture = -1
+				}
+			case "option":
+				if current != nil && selectField >= 0 {
+					finishOption()
+					inOption = true
+					optionText.Reset()
+					optionValue = attrs["value"]
+					_, optionSelected = attrs["selected"]
 				}
 			}
 		case html.TextToken:
-			if current != nil && capture >= 0 && capture < len(current.Fields) {
+			if current != nil && selectField >= 0 && inOption {
+				optionText.Write(z.Text())
+			} else if current != nil && capture >= 0 && capture < len(current.Fields) {
 				current.Fields[capture].Value += string(z.Text())
 			}
 		case html.EndTagToken:
 			name, _ := z.TagName()
 			switch string(name) {
+			case "option":
+				finishOption()
+			case "select":
+				finishSelect()
 			case "textarea":
 				capture = -1
 			case "form":
 				if current != nil {
+					finishSelect()
 					forms = append(forms, *current)
 					current = nil
+					capture = -1
+					selectField = -1
+					inOption = false
 				}
 			}
 		}
@@ -343,12 +401,6 @@ func takeSourceForm(forms []Form, used []bool, action, method string) (Form, boo
 			continue
 		}
 		if forms[i].Action == action && strings.EqualFold(forms[i].Method, method) {
-			used[i] = true
-			return forms[i], true
-		}
-	}
-	for i := range forms {
-		if !used[i] {
 			used[i] = true
 			return forms[i], true
 		}
